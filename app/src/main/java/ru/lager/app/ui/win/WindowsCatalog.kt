@@ -140,9 +140,13 @@ private fun CatEditDialog(item: CatItem, onDismiss: () -> Unit, onSave: (String,
 
 /** Импорт JSON-бэкапа из HTML (openDbImport / processDbImport). */
 @Composable
-private fun CatImportDialog(onDismiss: () -> Unit) {
+internal fun CatImportDialog(onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        CatalogStore.load(ctx)
+        ArrivalStore.load(ctx)
+    }
     var fileName by remember { mutableStateOf("") }
     var backup by remember { mutableStateOf<CatBackup?>(null) }
     var error by remember { mutableStateOf("") }

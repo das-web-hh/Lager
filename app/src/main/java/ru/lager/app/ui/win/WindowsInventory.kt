@@ -886,9 +886,11 @@ fun ImportExportSheet(env: WinEnv) {
     val ctx = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
+    var dbImportOpen by remember { mutableStateOf(false) }
     val closeSheet: () -> Unit = {
         scope.launch { sheetState.hide() }.invokeOnCompletion { env.nav.pop() }
     }
+    if (dbImportOpen) CatImportDialog(onDismiss = { dbImportOpen = false })
     ModalBottomSheet(
         onDismissRequest = { env.nav.pop() },
         sheetState = sheetState,
@@ -909,14 +911,21 @@ fun ImportExportSheet(env: WinEnv) {
                 ) { Text("✕", color = c.onSurfaceVariant) }
             }
             SheetAction("📊", "Импорт из Excel") { env.nav.replaceTop(Win.ExcelImport) }
-            SheetAction("📂", "Импорт базы (.json)") { env.info("Импорт базы — в разработке") }
+            SheetAction("📂", "Импорт базы (.json)") { dbImportOpen = true }
             SheetAction("📊", "Экспорт в Excel") { env.nav.replaceTop(Win.ExportExcel) }
             SheetAction("📍", "Экспорт инвентаризации в Excel") { env.nav.replaceTop(Win.InventoryExport) }
             SheetAction("💾", "Экспорт базы (.json)") {
+                // Формат как в HTML (buildBackupPayload): database + arrivals, чтобы файл читался в обе стороны.
                 val files = ctx.applicationContext.filesDir
                 fun raw(n: String) = java.io.File(files, n).takeIf { it.exists() }?.readText()?.ifBlank { null } ?: "[]"
-                val json = "{\"catalog\":" + raw("my_off_db.json") + ",\"arrivals\":" + raw("my_off_arr6.json") + "}"
-                if (!ExportHelper.share(ctx, "Lager_base_${ExportHelper.stamp()}.json", json.toByteArray(), ExportHelper.JSON)) env.info("Не удалось поделиться файлом")
+                fun arr(n: String) = runCatching { org.json.JSONArray(raw(n)) }.getOrDefault(org.json.JSONArray())
+                val json = org.json.JSONObject()
+                    .put("database", arr("my_off_db.json"))
+                    .put("arrivals", arr("my_off_arr6.json"))
+                    .put("exportedAt", java.time.Instant.now().toString())
+                    .put("version", "6.0")
+                    .toString(2)
+                if (!ExportHelper.share(ctx, "warehouse_backup_${ExportHelper.stamp()}.json", json.toByteArray(), ExportHelper.JSON)) env.info("Не удалось поделиться файлом")
             }
         }
     }
