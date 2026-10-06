@@ -104,7 +104,17 @@ fun SettingsWindow(env: WinEnv) {
     var geminiPause by rememberPrefInt("geminiPause", 1)
     var geminiAttempts by rememberPrefInt("geminiAttempts", 2)
     var cleanup by rememberPrefBool("cleanup", false)
-    var cleanupLoc by remember { mutableStateOf(0) }
+    // Очистка мест: черновик адреса, уровень, открытое окно выбора и подтверждение
+    var cdW by remember { mutableStateOf("") }
+    var cdRow by remember { mutableStateOf("--") }
+    var cdFloor by remember { mutableStateOf("--") }
+    var cdShelf by remember { mutableStateOf("--") }
+    var cdScope by remember { mutableStateOf("") }
+    var cdPicker by remember { mutableStateOf("") }
+    var cdConfirm by remember { mutableStateOf(false) }
+    var cdStatus by remember { mutableStateOf("") }
+    var cdStatusErr by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { InventoryStore.load(ctx) }
     var photoFolder by remember { mutableStateOf(SettingsStore.str(ctx, "photoFolder")) }
     var docFolder by remember { mutableStateOf(SettingsStore.str(ctx, "docFolder")) }
     var eraseAsk by remember { mutableStateOf(false) }
@@ -338,15 +348,39 @@ fun SettingsWindow(env: WinEnv) {
             SectionLabel("Инвентаризация")
             CardColumn {
                 Text("Очистка мест", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
+                val openPicker: (String) -> Unit = { part ->
+                    val need = when {
+                        part == "row" && cdW.isEmpty() -> "Сначала выберите склад"
+                        part == "floor" && (cdW.isEmpty() || cdRow == "--") -> "Сначала выберите склад и ряд"
+                        part == "shelf" && (cdW.isEmpty() || cdRow == "--" || cdFloor == "--") -> "Сначала выберите склад, ряд и этаж"
+                        else -> ""
+                    }
+                    if (need.isNotEmpty()) { cdStatus = need; cdStatusErr = true } else cdPicker = part
+                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AddressPart("Склад", "—", { env.info("Выбор — в разработке") }, Modifier.weight(1f))
-                    AddressPart("Ряд", "--", { env.info("Выбор — в разработке") }, Modifier.weight(1f))
-                    AddressPart("Этаж", "--", { env.info("Выбор — в разработке") }, Modifier.weight(1f))
-                    AddressPart("Полка", "--", { env.info("Выбор — в разработке") }, Modifier.weight(1f))
+                    AddressPart("Склад", cdW.ifEmpty { "—" }, { openPicker("warehouse") }, Modifier.weight(1f))
+                    AddressPart("Ряд", cdRow, { openPicker("row") }, Modifier.weight(1f))
+                    AddressPart("Этаж", cdFloor, { openPicker("floor") }, Modifier.weight(1f))
+                    AddressPart("Полка", cdShelf, { openPicker("shelf") }, Modifier.weight(1f))
                 }
                 HintText("Выберите склад, ряд, этаж или полку с товарами. Пустые места не показываются.")
-                SelectField("", listOf("Текущее место"), cleanupLoc, { cleanupLoc = it })
-                LongButton("Удалить", LongKind.Red, { env.info("Удаление — в разработке") })
+                if (cdStatus.isNotEmpty()) {
+                    StatusLine(cdStatus, if (cdStatusErr) StatusKind.Err else StatusKind.Ok, Modifier.fillMaxWidth())
+                }
+                LongButton("Удалить", LongKind.Red, {
+                    val ok = cdScope.isNotEmpty() && cdW.isNotEmpty() &&
+                        (cdScope == "warehouse" || cdRow != "--") &&
+                        (cdScope != "floor" && cdScope != "shelf" || cdFloor != "--") &&
+                        (cdScope != "shelf" || cdShelf != "--")
+                    if (!ok) {
+                        cdStatus = "Выберите место для удаления"; cdStatusErr = true
+                    } else {
+                        val t = InvAddr(cdW, cdRow, cdFloor, cdShelf)
+                        val (places, _, _) = InventoryStore.scopeStats(t, cdScope)
+                        if (places == 0) { cdStatus = "В этом месте пока нет товаров."; cdStatusErr = true }
+                        else cdConfirm = true
+                    }
+                })
             }
 
             // ----- Искусственный интеллект -----
@@ -537,6 +571,69 @@ fun SettingsWindow(env: WinEnv) {
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    // ----- Очистка мест: выбор значения -----
+    if (cdPicker.isNotEmpty()) {
+        val part = cdPicker
+        val options = InventoryStore.cleanupOptions(part, cdW, cdRow, cdFloor)
+        val title = when (part) { "warehouse" -> "Склад"; "row" -> "Ряд"; "floor" -> "Этаж"; else -> "Полка" }
+        val current = when (part) { "warehouse" -> cdW; "row" -> cdRow; "floor" -> cdFloor; else -> cdShelf }
+        DialogCard(title = title, onDismiss = { cdPicker = "" }) {
+            if (options.isEmpty()) {
+                HintText("Нет мест с товарами")
+            } else {
+                options.forEach { value ->
+                    Text(
+                        value,
+                        fontSize = 15.sp,
+                        fontWeight = if (value == current) FontWeight.Bold else FontWeight.Normal,
+                        color = if (value == current) c.primary else c.onSurface,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .md3Clickable {
+                                when (part) {
+                                    "warehouse" -> { cdW = value; cdRow = "--"; cdFloor = "--"; cdShelf = "--" }
+                                    "row" -> { cdRow = value; cdFloor = "--"; cdShelf = "--" }
+                                    "floor" -> { cdFloor = value; cdShelf = "--" }
+                                    else -> cdShelf = value
+                                }
+                                cdScope = part
+                                val label = InvAddr(cdW, cdRow, cdFloor, cdShelf).label
+                                cdStatus = "Место для очистки: $label"
+                                cdStatusErr = false
+                                cdPicker = ""
+                            }
+                            .padding(horizontal = 6.dp, vertical = 12.dp),
+                    )
+                    RowDivider()
+                }
+            }
+        }
+    }
+
+    // ----- Очистка мест: подтверждение удаления -----
+    if (cdConfirm) {
+        val target = InvAddr(cdW, cdRow, cdFloor, cdShelf)
+        val (places, items, ev) = InventoryStore.scopeStats(target, cdScope)
+        CatConfirmDialog(
+            title = when (cdScope) {
+                "shelf" -> "Вы уверены, что хотите удалить эту полку и все товары в ней?"
+                "floor" -> "Вы уверены, что хотите удалить этот этаж и все товары на нём?"
+                "row" -> "Вы уверены, что хотите удалить этот ряд и все товары в нём?"
+                else -> "Вы уверены, что хотите удалить этот склад и все товары в нём?"
+            },
+            text = "${target.label}\n$places мест · $items позиций · $ev сканирований",
+            yes = "Да, удалить",
+            onYes = {
+                val n = InventoryStore.clearScope(ctx, target, cdScope)
+                cdConfirm = false
+                cdScope = ""; cdW = ""; cdRow = "--"; cdFloor = "--"; cdShelf = "--"
+                cdStatus = "Удалено: $n записей"
+                cdStatusErr = false
+            },
+            onNo = { cdConfirm = false },
+        )
     }
 
     if (eraseAsk) {

@@ -452,6 +452,67 @@ object InventoryStore {
         saveLocations(ctx); saveEvents(ctx)
     }
 
+    // ---------- очистка мест из настроек (clearInventoryScope) ----------
+
+    /** Части адреса, доступные для очистки: warehouse → row → floor → shelf. */
+    private fun matchesScope(a: InvAddr, t: InvAddr, scope: String): Boolean {
+        val w = a.warehouse == t.warehouse
+        val r = a.row == t.row
+        val f = a.floor == t.floor
+        val sh = a.shelf == t.shelf
+        return when (scope) {
+            "shelf" -> w && r && f && sh
+            "floor" -> w && r && f
+            "row" -> w && r
+            else -> w
+        }
+    }
+
+    /** Значения для выбора в окне очистки — только места, где есть товары. */
+    fun cleanupOptions(part: String, w: String, r: String, f: String): List<String> {
+        if (part == "row" && w.isEmpty()) return emptyList()
+        if (part == "floor" && (w.isEmpty() || r == "--")) return emptyList()
+        if (part == "shelf" && (w.isEmpty() || r == "--" || f == "--")) return emptyList()
+        val values = locations.asSequence()
+            .filter { it.items.isNotEmpty() }
+            .map { it.addr }
+            .filter { a ->
+                if (part == "warehouse") true
+                else if (a.warehouse != w) false
+                else if (part == "row") true
+                else if (a.row != r) false
+                else if (part == "floor") true
+                else a.floor == f
+            }
+            .map { a ->
+                when (part) {
+                    "warehouse" -> a.warehouse
+                    "row" -> a.row
+                    "floor" -> a.floor
+                    else -> a.shelf
+                }.ifEmpty { "--" }
+            }
+            .toSet()
+        return values.sortedWith(compareBy<String>({ it.toIntOrNull() ?: -1 }, { it.lowercase() }))
+    }
+
+    /** (мест, позиций, сканирований), которые попадут под удаление. */
+    fun scopeStats(target: InvAddr, scope: String): Triple<Int, Int, Int> {
+        val locs = locations.filter { matchesScope(it.addr, target, scope) }
+        val ev = events.count { matchesScope(it.addr, target, scope) }
+        return Triple(locs.size, locs.sumOf { it.items.size }, ev)
+    }
+
+    /** Удаляет места и сканирования выбранного уровня. Возвращает число затронутых записей. */
+    fun clearScope(ctx: Context, target: InvAddr, scope: String): Int {
+        val (_, items, ev) = scopeStats(target, scope)
+        locations.removeAll { matchesScope(it.addr, target, scope) }
+        events.removeAll { matchesScope(it.addr, target, scope) }
+        current?.let { if (matchesScope(it, target, scope)) setCurrent(ctx, null) }
+        saveLocations(ctx); saveEvents(ctx)
+        return items + ev
+    }
+
     fun deleteLocation(ctx: Context, addr: InvAddr) {
         locations.removeAll { it.addr.key == addr.key }
         saveLocations(ctx)
