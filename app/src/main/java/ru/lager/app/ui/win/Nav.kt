@@ -51,6 +51,7 @@ sealed interface Win {
     data object ProductCard : Win
     data object ProductInfo : Win
     data object CardFilter : Win
+    data object NrHistory : Win
 }
 
 class WinEntry(val win: Win, val origin: Rect?) {
@@ -182,5 +183,6 @@ private fun WindowContent(win: Win, env: WinEnv) {
         Win.ProductCard -> ProductCardWindow(env)
         Win.ProductInfo -> ProductInfoWindow(env)
         Win.CardFilter -> CardFilterWindow(env)
+        Win.NrHistory -> NrHistoryWindow(env)
     }
 }

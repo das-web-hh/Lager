@@ -632,6 +632,8 @@ private class NrProduct(val id: Long, val name: String, val plan: Int) {
 }
 
 private class NrBatch(val id: Long, val title: String) {
+    /** Идентификатор записи в «Истории сканирований». */
+    val histId: String = "nrh_" + java.util.UUID.randomUUID().toString().take(10)
     val products = mutableStateListOf<NrProduct>()
     var saved by mutableStateOf(false)
     val docs = mutableStateListOf<Uri>()
@@ -692,6 +694,20 @@ fun ReceiveNameWindow(env: WinEnv) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { CatalogStore.load(ctx) }
 
+    val histUser = listOfNotNull(env.profile?.firstName, env.profile?.lastName)
+        .filter { it.isNotBlank() }.joinToString(" ").ifEmpty { env.profile?.email.orEmpty() }
+    fun logHist(b: NrBatch, type: String, text: String = "", batchId: String = "") {
+        NrHistoryStore.log(
+            ctx,
+            NrHistoryStore.Snapshot(
+                id = b.histId, user = histUser, sender = b.sender, order = b.order, date = "",
+                fileName = b.title, batchId = batchId,
+                products = b.products.map { NrHistProduct(it.name, it.ean, it.plan, it.actual, it.damage) },
+            ),
+            type, text,
+        )
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             scope.launch {
@@ -704,6 +720,7 @@ fun ReceiveNameWindow(env: WinEnv) {
                     val b = NrBatch(seq, title)
                     if (title.substringAfterLast('.', "").lowercase() == "pdf") {
                         note = "Разбор PDF подключим позже — добавляйте товары кнопкой «+»"
+                        logHist(b, "error", "Разбор PDF пока не поддерживается")
                     } else {
                         val table = withContext(Dispatchers.IO) {
                             runCatching { TableReader.read(ctx, u, title) }.getOrNull()
@@ -712,12 +729,14 @@ fun ReceiveNameWindow(env: WinEnv) {
                         table?.let { b.sender = nrFindSender(it) }
                         if (rows.isNullOrEmpty()) {
                             note = "В «$title» не найден столбец с наименованием — добавляйте товары кнопкой «+»"
+                            logHist(b, "error", "Не найден столбец с наименованием")
                         } else {
                             rows.forEach { (name, plan, ean) ->
                                 seq += 1
                                 b.products.add(NrProduct(seq, name, plan).also { it.ean = ean })
                             }
                             loaded += rows.size
+                            logHist(b, "recognized")
                         }
                     }
                     batches.add(b)
@@ -786,6 +805,7 @@ fun ReceiveNameWindow(env: WinEnv) {
             scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, emptyList(), dc) }
         }
         b.saved = true
+        logHist(b, "saved", "Партия сохранена: ${rows.size} поз.", batchId)
         env.info("Партия сохранена: ${rows.size} позиций, $total шт.")
     }
 
@@ -820,7 +840,7 @@ fun ReceiveNameWindow(env: WinEnv) {
                             )
                         },
                         onOpen = { b -> active = b; screen = 1 },
-                        onHistory = { env.info("История сканирований — в разработке") },
+                        onHistory = { env.nav.push(Win.NrHistory) },
                     )
                 } else if (screen == 1) {
                     NrList(
