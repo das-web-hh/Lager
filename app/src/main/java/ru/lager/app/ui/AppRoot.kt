@@ -39,10 +39,12 @@ import kotlinx.coroutines.delay
 import ru.lager.app.auth.AuthViewModel
 import ru.lager.app.auth.Screen
 import ru.lager.app.auth.ToastMsg
+import ru.lager.app.ui.win.CardState
 import ru.lager.app.ui.win.Win
 import ru.lager.app.ui.win.WinEnv
 import ru.lager.app.ui.win.WinNav
 import ru.lager.app.ui.win.WindowHost
+import ru.lager.app.ui.win.openCard
 
 @Composable
 fun AppRoot(
@@ -123,7 +125,9 @@ fun AppRoot(
                             }
                         },
                         onScan = { vm.showInfo(Str.scannerSoon(lang)) },
-                        onSearch = { vm.showInfo("${Str.searchHint(lang)} — ${Str.inDevelopment(lang)}") },
+                        onOpenCard = { row ->
+                            nav.openCard(CardState.build(row.ean, row.name, row.date, row.batchId))
+                        },
                     )
                 }
             }

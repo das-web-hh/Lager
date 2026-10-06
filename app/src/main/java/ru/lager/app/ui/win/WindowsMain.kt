@@ -68,14 +68,7 @@ fun ReceiveHubWindow(env: WinEnv) {
     }
 }
 
-// ---------- Задачи ----------
-
-@Composable
-fun TasksWindow() {
-    WindowScaffold("Задачи") {
-        ScrollBody { EmptyHint("Задач пока нет") }
-    }
-}
+// Задачи: см. WindowsTasksInfo.kt и TaskStore.kt
 
 // ---------- Профиль ----------
 
@@ -146,7 +139,7 @@ fun InfoWindow() {
     var showAbout by remember { mutableStateOf(false) }
     WindowScaffold("Инфо") {
         ScrollBody {
-            EmptyHint("Статистика появится здесь")
+            InfoStatsBlock()
             Md3Card {
                 SettingsRow(icon = "ℹ️", title = "О программе", sub = "Авторы и версия", onClick = { showAbout = true })
             }

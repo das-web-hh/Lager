@@ -48,6 +48,9 @@ sealed interface Win {
     data object Info : Win
     data object Documents : Win
     data object GeminiChat : Win
+    data object ProductCard : Win
+    data object ProductInfo : Win
+    data object CardFilter : Win
 }
 
 class WinEntry(val win: Win, val origin: Rect?) {
@@ -176,5 +179,8 @@ private fun WindowContent(win: Win, env: WinEnv) {
         Win.Info -> InfoWindow()
         Win.Documents -> DocumentsWindow(env)
         Win.GeminiChat -> GeminiChatWindow(env)
+        Win.ProductCard -> ProductCardWindow(env)
+        Win.ProductInfo -> ProductInfoWindow(env)
+        Win.CardFilter -> CardFilterWindow(env)
     }
 }

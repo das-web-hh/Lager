@@ -21,6 +21,7 @@ class L(private val ru: String, private val en: String, private val de: String) 
 
 object Str {
     val searchHint = L("Поиск товара", "Search item", "Artikel suchen")
+    val noData = L("Нет данных.", "No data.", "Keine Daten.")
     val inDevelopment = L("окно в разработке", "window under development", "Fenster in Entwicklung")
     val scannerSoon = L(
         "Сканер штрихкодов — в разработке",

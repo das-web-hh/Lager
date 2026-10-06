@@ -13,6 +13,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -25,6 +26,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -57,6 +60,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,6 +83,9 @@ import androidx.compose.ui.graphics.lerp as lerpColor
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -86,7 +93,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import ru.lager.app.ui.win.ArrivalStore
+import ru.lager.app.ui.win.CatalogStore
 import ru.lager.app.ui.win.EmphasizedEasing
+import ru.lager.app.ui.win.InventoryStore
+import ru.lager.app.ui.win.SearchEngine
+import ru.lager.app.ui.win.SearchRow
 import ru.lager.app.ui.win.pressScale
 import kotlinx.coroutines.launch
 import java.time.LocalDateTime
@@ -311,10 +323,10 @@ fun BarcodeScanIcon(color: Color, modifier: Modifier = Modifier) {
 private fun SearchBar(
     p: HomePalette,
     lang: Lang,
+    query: String,
+    onQueryChange: (String) -> Unit,
     onScan: () -> Unit,
-    onSearch: (String) -> Unit,
 ) {
-    var query by rememberSaveable { mutableStateOf("") }
     val pill = RoundedCornerShape(percent = 50)
     Row(
         modifier = Modifier
@@ -332,14 +344,25 @@ private fun SearchBar(
             }
             BasicTextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = onQueryChange,
                 singleLine = true,
                 textStyle = TextStyle(color = p.searchInput, fontSize = 18.sp),
                 cursorBrush = SolidColor(LagerColors.Blue),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onSearch(query) }),
+                keyboardActions = KeyboardActions(onSearch = { }),
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+        if (query.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable { onQueryChange("") },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("✕", color = p.searchHint, fontSize = 16.sp)
+            }
         }
         val scanSource = remember { MutableInteractionSource() }
         Box(
@@ -360,27 +383,122 @@ private fun HomePage1(
     lang: Lang,
     onTile: (String, String, Rect) -> Unit,
     onScan: () -> Unit,
-    onSearch: (String) -> Unit,
+    onOpenCard: (SearchRow) -> Unit,
 ) {
+    val ctx = LocalContext.current
+    var query by rememberSaveable { mutableStateOf("") }
+    val searching = query.trim().length >= 3
+
+    // Данные для поиска: каталог, история приёмок и инвентаризация.
+    LaunchedEffect(Unit) {
+        CatalogStore.load(ctx)
+        ArrivalStore.load(ctx)
+        InventoryStore.load(ctx)
+    }
+    // Как в HTML: через минуту поле и результаты очищаются.
+    LaunchedEffect(query) {
+        if (query.trim().length >= 3) {
+            delay(60_000)
+            query = ""
+        }
+    }
+    val results by remember {
+        derivedStateOf { if (query.trim().length >= 3) SearchEngine.search(query) else emptyList() }
+    }
+
     Column(Modifier.fillMaxSize()) {
-        Spacer(Modifier.height(50.dp))
-        ClockBlock(p)
-        Spacer(Modifier.height(28.dp))
-        SearchBar(p, lang, onScan, onSearch)
-        Spacer(Modifier.weight(1f))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 11.dp)
-                .padding(bottom = 36.dp),
-        ) {
-            Page1Tiles.forEach { t ->
-                TileCell(
-                    tile = t,
-                    lang = lang,
-                    labelColor = p.label,
-                    onClick = { r -> onTile(t.id, t.label(lang), r) },
+        if (searching) {
+            Spacer(Modifier.height(64.dp))
+        } else {
+            Spacer(Modifier.height(50.dp))
+            ClockBlock(p)
+            Spacer(Modifier.height(28.dp))
+        }
+        SearchBar(p, lang, query, { query = it }, onScan)
+        if (searching) {
+            SearchResults(results, p, lang, onOpenCard, Modifier.weight(1f))
+        } else {
+            Spacer(Modifier.weight(1f))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 11.dp)
+                    .padding(bottom = 36.dp),
+            ) {
+                Page1Tiles.forEach { t ->
+                    TileCell(
+                        tile = t,
+                        lang = lang,
+                        labelColor = p.label,
+                        onClick = { r -> onTile(t.id, t.label(lang), r) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Результаты поиска: дата (день.месяц), название, количество. */
+@Composable
+private fun SearchResults(
+    rows: List<SearchRow>,
+    p: HomePalette,
+    lang: Lang,
+    onOpen: (SearchRow) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (rows.isEmpty()) {
+        Box(modifier.fillMaxWidth().padding(top = 36.dp), contentAlignment = Alignment.TopCenter) {
+            Text(Str.noData(lang), color = p.label, fontSize = 15.sp)
+        }
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(rows) { r ->
+            val shape = RoundedCornerShape(14.dp)
+            val date = if (r.inventoryOnly) {
+                "📦"
+            } else {
+                val parts = r.date.ifEmpty { "—" }.split('.')
+                if (parts.size >= 2) parts[0] + "." + parts[1] else parts.joinToString(".")
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(p.searchBg.copy(alpha = 0.94f))
+                    .clickable { onOpen(r) }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    date,
+                    color = p.searchInput.copy(alpha = 0.7f),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(end = 2.dp),
+                )
+                Text(
+                    r.name,
+                    color = p.searchInput,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (r.menge > 0) r.menge.toString() else "–",
+                    color = LagerColors.Blue,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
                 )
             }
         }
@@ -488,7 +606,7 @@ fun MainHomeScreen(
     onToggleDark: () -> Unit,
     onTile: (id: String, title: String, bounds: Rect) -> Unit,
     onScan: () -> Unit,
-    onSearch: (String) -> Unit,
+    onOpenCard: (SearchRow) -> Unit,
 ) {
     val themeT by animateFloatAsState(
         if (dark) 1f else 0f, tween(300, easing = EmphasizedEasing), label = "homeTheme",
@@ -530,7 +648,7 @@ fun MainHomeScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) { page ->
                     if (page == 0) {
-                        HomePage1(p, lang, onTile, onScan, onSearch)
+                        HomePage1(p, lang, onTile, onScan, onOpenCard)
                     } else {
                         HomePage2(p, lang, onTile)
                     }
