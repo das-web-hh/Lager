@@ -1567,9 +1567,7 @@ private fun NrReport(products: List<NrProduct>, env: WinEnv, saved: Boolean, onS
 //  3. Автоприём (#autoReceiveModal)
 // =====================================================================
 
-private enum class ArStatus { Waiting, Processing, Success, Error }
-
-private class ArFile(val name: String, val path: String, val uri: Uri, val status: ArStatus = ArStatus.Waiting)
+private fun arSt(f: ArFile): ArStatus = AutoReceiveStore.status(f.key)
 
 private fun arAllowed(name: String, mime: String): Boolean {
     val ext = name.substringAfterLast('.', "").lowercase()
@@ -1595,6 +1593,7 @@ private fun arFolderName(tree: Uri?): String? {
 
 private fun arListFolder(ctx: Context, tree: Uri): List<ArFile> {
     val out = ArrayList<ArFile>()
+    val folder = arFolderName(tree).orEmpty()
     fun walk(docId: String, path: String, depth: Int) {
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
         val cols = arrayOf(
@@ -1611,7 +1610,7 @@ private fun arListFolder(ctx: Context, tree: Uri): List<ArFile> {
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                         if (depth < 4) walk(id, "$path$name/", depth + 1)
                     } else if (arAllowed(name, mime)) {
-                        out.add(ArFile(name, path + name, DocumentsContract.buildDocumentUriUsingTree(tree, id)))
+                        out.add(ArFile("$folder::${path + name}", name, path + name, DocumentsContract.buildDocumentUriUsingTree(tree, id)))
                     }
                 }
             }
@@ -1700,13 +1699,29 @@ fun AutoReceiveWindow(env: WinEnv) {
         scope.launch {
             files = withContext(Dispatchers.IO) {
                 val shared = ShareState.saved(ctx).filter { arAllowed(it.name, "") }
-                    .map { ArFile(it.name, "Share Target/" + it.name, Uri.fromFile(it)) }
+                    .map { ArFile("share::${it.parentFile?.name}/${it.name}", it.name, "Share Target/" + it.name, Uri.fromFile(it)) }
                 (if (t != null) arListFolder(ctx, t) else emptyList()) + shared
             }
         }
     }
 
     LaunchedEffect(treeUri, ShareState.version) { refresh() }
+
+    // Статусы читаем с диска один раз, затем запускаем очередь на каждом новом списке файлов.
+    LaunchedEffect(Unit) { AutoReceiveStore.load(ctx) }
+    LaunchedEffect(files) {
+        if (files.isNotEmpty()) AutoReceiveRunner.start(ctx) { files }
+    }
+
+    // Периодическая проверка папки: интервал из «Настройки → Время проверки папки автоприёма».
+    val intervalIdx = rememberPrefInt("autoInterval", 4).value
+    LaunchedEffect(treeUri, intervalIdx) {
+        val minutes = listOf(1, 2, 5, 10, 15, 30, 60).getOrElse(intervalIdx) { 15 }
+        while (true) {
+            delay(minutes * 60_000L)
+            refresh()
+        }
+    }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -1718,16 +1733,16 @@ fun AutoReceiveWindow(env: WinEnv) {
         }
     }
 
-    val waiting = files.count { it.status == ArStatus.Waiting }
-    val processing = files.count { it.status == ArStatus.Processing }
-    val success = files.count { it.status == ArStatus.Success }
-    val errors = files.count { it.status == ArStatus.Error }
+    val waiting = files.count { arSt(it) == ArStatus.Waiting }
+    val processing = files.count { arSt(it) == ArStatus.Processing }
+    val success = files.count { arSt(it) == ArStatus.Success }
+    val errors = files.count { arSt(it) == ArStatus.Error }
     val effectiveFilter = if (filter == 4 && errors == 0) 0 else filter
     val visible = when (effectiveFilter) {
-        1 -> files.filter { it.status == ArStatus.Waiting }
-        2 -> files.filter { it.status == ArStatus.Processing }
-        3 -> files.filter { it.status == ArStatus.Success }
-        4 -> files.filter { it.status == ArStatus.Error }
+        1 -> files.filter { arSt(it) == ArStatus.Waiting }
+        2 -> files.filter { arSt(it) == ArStatus.Processing }
+        3 -> files.filter { arSt(it) == ArStatus.Success }
+        4 -> files.filter { arSt(it) == ArStatus.Error }
         else -> files
     }
 
@@ -1775,7 +1790,9 @@ fun AutoReceiveWindow(env: WinEnv) {
                     .height(3.dp)
                     .background(c.primary.copy(alpha = 0.12f)),
             ) {
-                Box(Modifier.fillMaxHeight().fillMaxWidth(0f).background(c.primary))
+                val totals = GeminiClient.totals(ctx)
+                val frac = if (totals.limit > 0) (totals.total.toFloat() / totals.limit).coerceIn(0f, 1f) else 0f
+                Box(Modifier.fillMaxHeight().fillMaxWidth(frac).background(c.primary))
             }
 
             // фильтры (.md3-chips)
@@ -1893,6 +1910,16 @@ fun AutoReceiveWindow(env: WinEnv) {
                     }
                 }
 
+                if (AutoReceiveRunner.notice.value.isNotEmpty()) {
+                    Text(
+                        AutoReceiveRunner.notice.value,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        color = if (AutoReceiveRunner.noticeError.value) c.error else c.primary,
+                        modifier = Modifier.padding(horizontal = 2.dp),
+                    )
+                }
+
                 Text(
                     "${files.size} ${arFilesWord(files.size)}",
                     fontSize = 13.sp,
@@ -1917,13 +1944,21 @@ fun AutoReceiveWindow(env: WinEnv) {
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         visible.forEach { f ->
-                            val label = when (f.status) {
-                                ArStatus.Success -> "Обработано"
+                            val st = arSt(f)
+                            val rec = AutoReceiveStore.get(f.key)
+                            val label = when (st) {
+                                ArStatus.Success -> when {
+                                    rec != null && rec.duplicate ->
+                                        (if (rec.order.isNotEmpty()) "Заказ ${rec.order}" else "Заказ") + " уже в истории · накладная добавлена"
+                                    (rec?.items ?: 0) > 0 -> "Обработано · ${rec?.items} поз." +
+                                        (rec?.order?.takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "")
+                                    else -> "Обработано"
+                                }
                                 ArStatus.Processing -> "Обрабатывается"
-                                ArStatus.Error -> "Ошибка обработки"
+                                ArStatus.Error -> rec?.error?.takeIf { it.isNotEmpty() } ?: "Ошибка обработки"
                                 ArStatus.Waiting -> "Ожидает обработки"
                             }
-                            val metaColor = when (f.status) {
+                            val metaColor = when (st) {
                                 ArStatus.Success -> c.success
                                 ArStatus.Processing -> c.primary
                                 ArStatus.Error -> c.error
@@ -1937,8 +1972,11 @@ fun AutoReceiveWindow(env: WinEnv) {
                                     .background(c.card)
                                     .border(1.dp, c.outlineVariant, RcvR16)
                                     .then(
-                                        if (f.status == ArStatus.Error) {
-                                            Modifier.md3Clickable { env.info("Повтор обработки — в разработке") }
+                                        if (st == ArStatus.Error) {
+                                            Modifier.md3Clickable {
+                                                AutoReceiveStore.retry(ctx, f.key)
+                                                AutoReceiveRunner.start(ctx) { files }
+                                            }
                                         } else {
                                             Modifier
                                         },
@@ -1957,7 +1995,7 @@ fun AutoReceiveWindow(env: WinEnv) {
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    Text(label, fontSize = 12.sp, color = metaColor, modifier = Modifier.padding(top = 3.dp))
+                                    Text(label, fontSize = 12.sp, lineHeight = 16.sp, color = metaColor, modifier = Modifier.padding(top = 3.dp))
                                 }
                             }
                         }
