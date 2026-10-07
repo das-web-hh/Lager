@@ -3,6 +3,7 @@ package ru.lager.app
 import android.app.Application
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
+import ru.lager.app.ui.win.AutoReceiveWorker
 
 class LagerApp : Application() {
     override fun onCreate() {
@@ -17,7 +18,6 @@ class LagerApp : Application() {
                 .build()
             FirebaseApp.initializeApp(this, options)
         }
-        // Очередь отправки накладных и фото на Google Диск
-        ru.lager.app.ui.win.DriveOutbox.start(this)
+        AutoReceiveWorker.schedule(this)
     }
 }

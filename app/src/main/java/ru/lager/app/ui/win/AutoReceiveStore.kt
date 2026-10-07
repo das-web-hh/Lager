@@ -149,6 +149,25 @@ internal object AutoReceiveRunner {
         noticeError.value = error
     }
 
+    /**
+     * Для фонового воркера (AutoReceiveWorker): ждёт, пока очередь обработает не больше [maxFiles] файлов.
+     * Возвращает число обработанных файлов или -1, если очередь уже идёт (например, открыто окно автоприёма).
+     */
+    suspend fun runOnce(ctx: Context, files: List<ArFile>, maxFiles: Int): Int = withContext(Dispatchers.Main) {
+        if (!mutex.tryLock()) return@withContext -1
+        running.value = true
+        try {
+            val app = ctx.applicationContext
+            AutoReceiveStore.load(app)
+            ArrivalStore.load(app)
+            CatalogStore.load(app)
+            loop(app, { files }, maxFiles)
+        } finally {
+            running.value = false
+            mutex.unlock()
+        }
+    }
+
     /** Запускает очередь, если она ещё не идёт. [files] читается заново перед каждым файлом. */
     fun start(ctx: Context, files: () -> List<ArFile>) {
         val app = ctx.applicationContext
@@ -165,23 +184,26 @@ internal object AutoReceiveRunner {
         }
     }
 
-    private suspend fun loop(ctx: Context, files: () -> List<ArFile>) {
+    private suspend fun loop(ctx: Context, files: () -> List<ArFile>, maxFiles: Int = Int.MAX_VALUE): Int {
         say("")
-        while (true) {
+        var done = 0
+        while (done < maxFiles) {
             val next = files().firstOrNull { AutoReceiveStore.status(it.key) == ArStatus.Waiting } ?: break
 
             val keys = SettingsStore.geminiKeys(ctx)
             if (keys.isEmpty()) {
                 say("Автоприём остановлен: в настройках Gemini не указан API-ключ.", true)
-                return
+                return done
             }
             if (keys.all { GeminiClient.keyUsage(ctx, it.key) >= it.limit }) {
                 say("Все API-ключи Gemini исчерпали заданные лимиты токенов.", true)
-                return
+                return done
             }
             process(ctx, next)
+            done++
         }
         say("")
+        return done
     }
 
     private suspend fun process(ctx: Context, f: ArFile) {

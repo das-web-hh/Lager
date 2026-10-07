@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -167,14 +166,6 @@ fun ProductCardWindow(env: WinEnv) {
     val photos = files.filter { it.kind == AttachmentStore.KIND_PHOTO }
     val docs = files.filter { it.kind == AttachmentStore.KIND_DOC }
 
-    // Файлы Google Диска: уже загруженные для партии + найденные по коду (EAN/артикул).
-    val drive by produceState<List<DriveLink>>(emptyList(), card.ean, card.batchId) {
-        val local = if (card.batchId.isEmpty()) emptyList() else DriveOutbox.links(ctx, card.batchId)
-        value = local
-        val remote = runCatching { DriveOutbox.search(ctx, card.ean, "") }.getOrDefault(emptyList())
-        value = (local + remote).distinctBy { it.url }
-    }
-
     fun openFile(a: Attachment) {
         if (!AttachmentStore.open(ctx, a)) env.info("Нет приложения для просмотра файла")
     }
@@ -209,47 +200,6 @@ fun ProductCardWindow(env: WinEnv) {
             }
             Spacer(Modifier.height(14.dp))
             PhotoGallery(photos) { openFile(it) }
-            if (drive.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "Google Диск",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = c.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 2.dp, bottom = 6.dp),
-                )
-                Md3Card {
-                    drive.forEach { f ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 48.dp)
-                                .md3Clickable {
-                                    runCatching {
-                                        ctx.startActivity(
-                                            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(f.url))
-                                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
-                                        )
-                                    }.onFailure { env.info("Нет приложения для открытия ссылки") }
-                                }
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Text(if (f.isPdf) "📄" else "🖼️", fontSize = 18.sp)
-                            Text(
-                                f.name,
-                                fontSize = 14.sp,
-                                color = c.onSurface,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text("Открыть", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = c.primary)
-                        }
-                    }
-                }
-            }
             Spacer(Modifier.height(8.dp))
         }
     }

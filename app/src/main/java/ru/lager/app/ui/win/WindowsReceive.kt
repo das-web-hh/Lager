@@ -65,7 +65,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
@@ -627,8 +626,7 @@ private fun RcvSaveScreen(env: WinEnv, items: List<RcvItem>, onSaved: () -> Unit
                             )
                             if (photos.isNotEmpty() || docs.isNotEmpty()) {
                                 val ph = photos.toList(); val dc = docs.toList()
-                                val firstEan = ready.firstOrNull()?.ean.orEmpty()
-                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc, firstEan) }
+                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc) }
                             }
                             // Товары с реальными названиями попадают в каталог; заглушки «Товар <EAN>» — нет.
                             ready.forEach {
@@ -820,63 +818,6 @@ fun ReceiveNameWindow(env: WinEnv) {
         }
     }
 
-    // Серия снимков накладной (nrCameraModal): каждый кадр — страница, позиции складываются в одну партию.
-    var camOpen by remember { mutableStateOf(false) }
-    fun importShots(shots: List<Uri>) {
-        if (shots.isEmpty()) return
-        scope.launch {
-            seq += 1
-            val stamp = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.US).format(java.util.Date())
-            val b = NrBatch(seq, "Снимки накладной $stamp")
-            val merged = LinkedHashMap<String, Triple<String, Int, String>>()
-            var failed = ""
-            shots.forEachIndexed { i, u ->
-                env.info("Gemini распознаёт кадр ${i + 1} из ${shots.size}…")
-                try {
-                    val inv = NrInvoice.recognize(ctx, u, "кадр_${i + 1}.jpg") { env.info(it) }
-                    if (b.sender.isEmpty()) b.sender = inv.sender
-                    if (b.order.isEmpty()) b.order = inv.order
-                    inv.items.forEach { (name, qty, ean) ->
-                        val key = name.lowercase().replace(Regex("\\s+"), " ")
-                        val old = merged[key]
-                        merged[key] = if (old != null) Triple(old.first, old.second + qty, old.third.ifEmpty { ean }) else Triple(name, qty, ean)
-                    }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    failed = e.message ?: "Не удалось распознать кадр ${i + 1}"
-                }
-            }
-            merged.values.forEach { (name, qty, ean) ->
-                seq += 1
-                b.products.add(NrProduct(seq, name, qty).also { p -> p.ean = ean })
-            }
-            // снимки прикрепляются к партии как накладные и уходят на Google Диск при сохранении
-            b.docs.addAll(shots.take(AttachmentStore.MAX_DOCS))
-            if (merged.isEmpty()) {
-                logHist(b, "error", failed.ifEmpty { "Gemini не нашёл товаров на снимках" })
-            } else {
-                logHist(b, "recognized")
-            }
-            batches.add(b)
-            active = b
-            screen = 1
-            env.info(
-                when {
-                    merged.isEmpty() -> failed.ifEmpty { "Gemini не нашёл товаров на снимках — добавляйте товары кнопкой «+»" }
-                    failed.isNotEmpty() -> "Загружено позиций: ${merged.size}. Часть кадров не распознана: $failed"
-                    else -> "Загружено позиций: ${merged.size}"
-                },
-            )
-        }
-    }
-    if (camOpen) {
-        NrCameraDialog(
-            onDone = { camOpen = false; importShots(it) },
-            onDismiss = { camOpen = false },
-        )
-    }
-
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> importUris(uris) }
 
     // Файлы из Android «Поделиться» → «Приём по имени»
@@ -968,7 +909,6 @@ fun ReceiveNameWindow(env: WinEnv) {
                 if (screen == 0 || list == null) {
                     NrStart(
                         batches = batches,
-                        onCamera = { camOpen = true },
                         onPick = {
                             picker.launch(
                                 arrayOf(
@@ -1187,7 +1127,6 @@ private fun NrProgress(pct: Int, done: Int, total: Int) {
 private fun NrStart(
     batches: List<NrBatch>,
     onPick: () -> Unit,
-    onCamera: () -> Unit,
     onOpen: (NrBatch) -> Unit,
     onHistory: () -> Unit,
 ) {
@@ -1223,30 +1162,6 @@ private fun NrStart(
             Text("📁", fontSize = 40.sp)
             Text("Выбрать файл", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = c.onSurface, modifier = Modifier.padding(top = 6.dp))
             Text("Excel или PDF", fontSize = 13.sp, color = c.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
-        }
-
-        // nr-camera-btn: серия снимков накладной
-        Row(
-            Modifier
-                .widthIn(max = 420.dp)
-                .fillMaxWidth()
-                .padding(top = 12.dp)
-                .heightIn(min = 52.dp)
-                .clip(RcvR16)
-                .background(Brush.linearGradient(listOf(Color(0xFFF08C00), Color(0xFFD9480F))))
-                .md3Clickable(color = Color.White, onClick = onCamera)
-                .padding(horizontal = 18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            Text("📷", fontSize = 20.sp)
-            Text(
-                "Снять накладную",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color.White,
-                modifier = Modifier.padding(start = 10.dp),
-            )
         }
 
         Column(Modifier.widthIn(max = 420.dp).fillMaxWidth().padding(top = 24.dp)) {

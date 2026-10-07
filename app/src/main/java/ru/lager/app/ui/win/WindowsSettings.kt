@@ -217,20 +217,6 @@ fun SettingsWindow(env: WinEnv) {
                         if (!u.startsWith("http")) env.info("Укажите URL Web App") else probe("Web App") { SettingsStore.httpCheck(u) }
                     }, Modifier.weight(1f))
                 }
-                LaunchedEffect(Unit) { DriveOutbox.refreshPending(ctx) }
-                val gdPending = DriveOutbox.pending.value
-                val gdStatus = DriveOutbox.status.value
-                if (gdStatus.isNotEmpty()) {
-                    HintText(gdStatus)
-                } else if (gdPending > 0) {
-                    HintText("Ожидают отправки на Google Диск: $gdPending файл(ов). Уйдут автоматически после настройки.")
-                }
-                if (gdPending > 0) {
-                    SoftButton("Отправить очередь сейчас", {
-                        val c = DriveOutbox.config(ctx)
-                        if (!c.ready) env.info("Укажите URL Web App и ID папки и сохраните") else scope.launch { DriveOutbox.flush(ctx) }
-                    }, Modifier.fillMaxWidth())
-                }
                 HintText("Файлы получают имена вида код_дата_имя-файла. При открытии карточки приложение ищет этот код в папке и показывает найденные фото и PDF.")
             }
 
@@ -507,12 +493,12 @@ fun SettingsWindow(env: WinEnv) {
             Md3Card {
                 SettingsRow(
                     icon = "⏱️", title = "Время проверки папки автоприёма",
-                    sub = "Как часто приложение ищет новые файлы в выбранной папке",
+                    sub = "Как часто приложение ищет новые файлы в выбранной папке. В фоне, при закрытом приложении, Android разрешает проверку не чаще раза в 15 минут",
                 ) {
                     SelectField(
                         "",
                         listOf("Каждую минуту", "Каждые 2 минуты", "Каждые 5 минут", "Каждые 10 минут", "Каждые 15 минут", "Каждые 30 минут", "Каждый час"),
-                        autoInterval, { autoInterval = it },
+                        autoInterval, { autoInterval = it; AutoReceiveWorker.schedule(ctx) },
                     )
                 }
                 RowDivider()
