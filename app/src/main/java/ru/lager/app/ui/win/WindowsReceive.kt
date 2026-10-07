@@ -766,9 +766,29 @@ fun ReceiveNameWindow(env: WinEnv) {
                     val title = rcvDisplayName(ctx, u)
                     seq += 1
                     val b = NrBatch(seq, title)
-                    if (title.substringAfterLast('.', "").lowercase() == "pdf") {
-                        note = "Разбор PDF подключим позже — добавляйте товары кнопкой «+»"
-                        logHist(b, "error", "Разбор PDF пока не поддерживается")
+                    if (NrInvoice.isRecognizable(title)) {
+                        env.info("Gemini распознаёт «$title»…")
+                        try {
+                            val inv = NrInvoice.recognize(ctx, u, title) { env.info(it) }
+                            if (inv.items.isEmpty()) {
+                                note = "Gemini не нашёл товаров в «$title» — добавляйте товары кнопкой «+»"
+                                logHist(b, "error", "Gemini не нашёл товаров в документе")
+                            } else {
+                                b.sender = inv.sender
+                                b.order = inv.order
+                                inv.items.forEach { (name, qty, ean) ->
+                                    seq += 1
+                                    b.products.add(NrProduct(seq, name, qty).also { p -> p.ean = ean })
+                                }
+                                loaded += inv.items.size
+                                logHist(b, "recognized")
+                            }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            note = e.message ?: "Не удалось распознать «$title»"
+                            logHist(b, "error", note)
+                        }
                     } else {
                         val table = withContext(Dispatchers.IO) {
                             runCatching { TableReader.read(ctx, u, title) }.getOrNull()
