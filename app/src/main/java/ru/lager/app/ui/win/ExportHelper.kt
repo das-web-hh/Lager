@@ -170,4 +170,38 @@ object ExportHelper {
             true
         }.getOrDefault(false)
     }
+
+    /** Печать документа из нескольких таблиц (акт расхождений): (заголовок, шапка, строки). */
+    fun printSections(
+        ctx: Context,
+        title: String,
+        heading: String,
+        meta: List<String>,
+        sections: List<Triple<String, List<String>, List<List<String>>>>,
+    ): Boolean {
+        val act = findActivity(ctx) ?: return false
+        val html = buildString {
+            append("<html><head><meta charset='utf-8'><style>body{font-family:sans-serif;font-size:13px}h2{margin:14px 0 6px}")
+            append("table{border-collapse:collapse;width:100%}td,th{border:1px solid #444;padding:6px 8px;text-align:left}th{background:#eee}</style></head><body>")
+            append("<h2>${esc(heading)}</h2>")
+            meta.forEach { append("<div>${esc(it)}</div>") }
+            sections.forEachIndexed { i, (name, head, rows) ->
+                append("<h2>${i + 1}. ${esc(name)}</h2><table><tr>${head.joinToString("") { "<th>${esc(it)}</th>" }}</tr>")
+                rows.forEach { r -> append("<tr>${r.joinToString("") { v -> "<td>${esc(v)}</td>" }}</tr>") }
+                append("</table>")
+            }
+            append("</body></html>")
+        }
+        return runCatching {
+            val web = WebView(act)
+            web.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String?) {
+                    val pm = act.getSystemService(Context.PRINT_SERVICE) as PrintManager
+                    pm.print(title, view.createPrintDocumentAdapter(title), PrintAttributes.Builder().build())
+                }
+            }
+            web.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            true
+        }.getOrDefault(false)
+    }
 }

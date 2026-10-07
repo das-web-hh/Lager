@@ -666,6 +666,31 @@ private class NrBatch(val id: Long, val title: String) {
 private fun reportRows(b: NrBatch): List<List<String>> =
     b.products.map { listOf(it.name, it.plan.toString(), it.actual.toString(), it.damage.toString(), (it.actual - it.plan).toString()) }
 
+private const val NR_EXECUTOR = "Abteilung Wareneingang"
+
+/** nrPrintDiscrepancy: брак, недопоставка, лишний товар вне накладной, перепоставка. */
+private fun nrDiscrepancySections(b: NrBatch): List<Triple<String, List<String>, List<List<String>>>> {
+    fun sec(title: String, qtyTitle: String, rows: List<NrProduct>, amount: (NrProduct) -> Int, status: (NrProduct) -> String) =
+        Triple(
+            title,
+            listOf("№", "Artikelbezeichnung", qtyTitle, "Status"),
+            rows.mapIndexed { i, p -> listOf((i + 1).toString(), p.name, "${amount(p)} Stk.", status(p)) },
+        )
+    val ps = b.products
+    return listOf(
+        sec("Angenommene B-Ware (Beschädigte Artikel)", "Menge", ps.filter { it.damage > 0 }, { it.damage }, { "B-Ware (Beschädigt)" }),
+        sec(
+            "Nicht gelieferte Ware (Fehlmengen)", "Fehlmenge", ps.filter { it.plan > 0 && it.actual < it.plan },
+            { it.plan - it.actual }, { "Nicht geliefert (Lieferschein: ${it.plan}, gezählt: ${it.actual})" },
+        ),
+        sec("Falsche Ware geliefert (nicht laut Lieferschein)", "Menge", ps.filter { it.plan == 0 && it.actual > 0 }, { it.actual }, { "Nicht im Lieferschein" }),
+        sec(
+            "Zuviel gelieferte Ware (Mehrmengen)", "Mehrmenge", ps.filter { it.plan > 0 && it.actual > it.plan },
+            { it.actual - it.plan }, { "Zuviel geliefert (Lieferschein: ${it.plan}, gezählt: ${it.actual})" },
+        ),
+    ).filter { it.third.isNotEmpty() }
+}
+
 private fun nrGuess(headers: List<String>, keywords: List<String>): Int =
     headers.indexOfFirst { h -> keywords.any { h.lowercase().contains(it) } }
 
@@ -707,6 +732,7 @@ fun ReceiveNameWindow(env: WinEnv) {
     val ctx = LocalContext.current
     val batches = remember { mutableStateListOf<NrBatch>() }
     var active by remember { mutableStateOf<NrBatch?>(null) }
+    var printAsk by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf(0) } // 0 старт, 1 список, 2 сверка
     var seq by remember { mutableStateOf(0L) }
     var qtyEdit by remember { mutableStateOf<Pair<NrProduct, Boolean>?>(null) } // true = брак
@@ -903,13 +929,48 @@ fun ReceiveNameWindow(env: WinEnv) {
                             )
                         }
                     }
+                    if (printAsk) {
+                        DialogCard(
+                            title = "Выберите тип печати",
+                            onDismiss = { printAsk = false },
+                            actions = { DialogActionCancel("Отмена") { printAsk = false } },
+                        ) {
+                            SoftButton("📄 Полный отчёт", {
+                                printAsk = false
+                                val b = active
+                                if (b != null) {
+                                    val rows = b.products.mapIndexed { i, p ->
+                                        listOf((i + 1).toString(), p.name, p.plan.toString(), p.actual.toString(), p.damage.toString())
+                                    }
+                                    val meta = listOf("Исполнитель склада: $NR_EXECUTOR", "Заказчик: STRÖH E-Commerce GmbH", "№ заказа: ${b.order.ifBlank { "-" }}")
+                                        .joinToString(" · ")
+                                    if (!ExportHelper.printTable(ctx, "АКТ ПРИЕМА ТОВАРОВ (ПОЛНЫЙ)", listOf("№", "Наименование", "План", "Факт", "Брак"), rows, meta)) {
+                                        env.info("Не удалось открыть печать")
+                                    }
+                                }
+                            }, Modifier.fillMaxWidth())
+                            SoftButton("⚠️ Печать расхождения", {
+                                printAsk = false
+                                val b = active
+                                if (b != null) {
+                                    val sections = nrDiscrepancySections(b)
+                                    if (sections.isEmpty()) {
+                                        env.info("Расхождений нет — печатать нечего.")
+                                    } else if (!ExportHelper.printSections(
+                                            ctx, "Расхождения при приемке", "MITTEILUNG ÜBER ABWEICHUNGEN BEIM WARENEINGANG",
+                                            listOf("Abteilung: $NR_EXECUTOR", "Bestell-Nr.: ${b.order.ifBlank { "-" }}", "Lieferant: ${b.sender.ifBlank { "-" }}"),
+                                            sections,
+                                        )
+                                    ) {
+                                        env.info("Не удалось открыть печать")
+                                    }
+                                }
+                            }, Modifier.fillMaxWidth())
+                        }
+                    }
                     NrReport(
                         products = list, env = env, saved = active?.saved == true, onSave = { saveBatch() },
-                        onPrint = {
-                            val b = active
-                            if (b != null && !ExportHelper.printTable(ctx, b.title.ifEmpty { "Приёмка" }, listOf("Наименование", "План", "Факт", "Брак", "Разница"), reportRows(b), listOf(b.sender, b.order).filter { it.isNotBlank() }.joinToString(" · ")))
-                                env.info("Не удалось открыть печать")
-                        },
+                        onPrint = { if (active != null) printAsk = true },
                         onExport = {
                             val b = active
                             if (b != null) {
