@@ -626,7 +626,8 @@ private fun RcvSaveScreen(env: WinEnv, items: List<RcvItem>, onSaved: () -> Unit
                             )
                             if (photos.isNotEmpty() || docs.isNotEmpty()) {
                                 val ph = photos.toList(); val dc = docs.toList()
-                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc) }
+                                val firstEan = ready.firstOrNull()?.ean.orEmpty()
+                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc, firstEan) }
                             }
                             // Товары с реальными названиями попадают в каталог; заглушки «Товар <EAN>» — нет.
                             ready.forEach {
