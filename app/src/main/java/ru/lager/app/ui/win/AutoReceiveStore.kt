@@ -212,6 +212,16 @@ internal object AutoReceiveRunner {
         AutoReceiveStore.put(ctx, f.key, ArRecord(ArStatus.Processing, attempts = attempts, sentAt = sentAt))
         say("Обрабатывается «${f.name}»…")
         try {
+            // Предпроверка: номер заказа из текстового слоя PDF. Заказ уже в истории, значит Gemini не нужен.
+            ArrivalStore.load(ctx)
+            val pre = OrderPrecheck.extract(ctx, f.uri, f.name)
+            if (pre.isNotEmpty()) {
+                val dup = attachToExisting(ctx, f, pre, "")
+                if (dup != null) {
+                    AutoReceiveStore.put(ctx, f.key, dup.copy(attempts = attempts, sentAt = 0L))
+                    return
+                }
+            }
             val inv = NrInvoice.recognize(ctx, f.uri, f.name) { say(it) }
             CatalogStore.load(ctx)
             val rec = commit(ctx, f, inv).copy(attempts = attempts, sentAt = sentAt)
@@ -231,25 +241,32 @@ internal object AutoReceiveRunner {
         }
     }
 
+    /**
+     * _autoReceiveOrderInHistory + _autoReceiveAttachFileToOrder: заказ уже есть в истории приёмок,
+     * поэтому файл прикрепляется к существующей партии. null, если заказа в истории нет.
+     */
+    private suspend fun attachToExisting(ctx: Context, f: ArFile, order: String, sender: String): ArRecord? {
+        if (order.isBlank() || OrderPrecheck.isNoData(order)) return null
+        val norm = OrderPrecheck.normalize(order)
+        if (norm.isEmpty()) return null
+        val existing = ArrivalStore.items.firstOrNull {
+            it.batchId.isNotEmpty() && !OrderPrecheck.isNoData(it.order) && OrderPrecheck.normalize(it.order) == norm
+        } ?: return null
+        withContext(Dispatchers.IO) {
+            AttachmentStore.save(ctx, existing.batchId, emptyList(), listOf(f.uri))
+        }
+        return ArRecord(
+            ArStatus.Success, processedAt = System.currentTimeMillis(), batchId = existing.batchId,
+            sender = sender.ifEmpty { existing.sender }, order = order, duplicate = true,
+        )
+    }
+
     /** _saveAutoReceiveBatch: позиции → история приёмок и каталог, документ → вложение партии. */
     private suspend fun commit(ctx: Context, f: ArFile, inv: NrInvoiceResult): ArRecord {
         val now = System.currentTimeMillis()
 
         // Заказ уже есть в истории: документ прикрепляем к нему, позиции не дублируем.
-        if (inv.order.isNotEmpty()) {
-            val existing = ArrivalStore.items.firstOrNull {
-                it.order.equals(inv.order, ignoreCase = true) && it.batchId.isNotEmpty()
-            }
-            if (existing != null) {
-                withContext(Dispatchers.IO) {
-                    AttachmentStore.save(ctx, existing.batchId, emptyList(), listOf(f.uri))
-                }
-                return ArRecord(
-                    ArStatus.Success, processedAt = now, batchId = existing.batchId,
-                    sender = inv.sender, order = inv.order, duplicate = true,
-                )
-            }
-        }
+        attachToExisting(ctx, f, inv.order, inv.sender)?.let { return it }
 
         if (inv.items.isEmpty()) {
             return ArRecord(ArStatus.Error, error = "Gemini не нашёл товаров в документе.")
