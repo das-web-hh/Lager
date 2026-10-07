@@ -289,6 +289,7 @@ fun ReceiveManualWindow(env: WinEnv) {
             onSkip = { unknownEan = null },
             onSave = { name ->
                 CatalogStore.ensure(rcvCtx, name, ean)
+                NewProductSync.submit(env.profile, name, ean)
                 addItem(name, ean)
                 env.info("Добавлено в каталог и в приёмку: $name")
                 unknownEan = null
