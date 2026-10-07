@@ -22,6 +22,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.lager.app.ui.Lang
 
+/** В warehouse.html эти разделы скрыты (display:none): интерфейс, внешний и Wi-Fi сканер. Значения в настройках сохраняются, но не показываются. */
+private const val SHOW_HTML_HIDDEN = false
+
 @Composable
 private fun CardColumn(content: @Composable ColumnScope.() -> Unit) {
     Md3Card {
@@ -118,6 +121,22 @@ fun SettingsWindow(env: WinEnv) {
     var photoFolder by remember { mutableStateOf(SettingsStore.str(ctx, "photoFolder")) }
     var docFolder by remember { mutableStateOf(SettingsStore.str(ctx, "docFolder")) }
     var eraseAsk by remember { mutableStateOf(false) }
+
+    // Папка автоприёма: тот же ключ, что в окне «Авто» (lager_auto_receive / tree)
+    val autoPrefs = remember { ctx.getSharedPreferences("lager_auto_receive", android.content.Context.MODE_PRIVATE) }
+    var autoFolder by remember { mutableStateOf(autoPrefs.getString("tree", "") ?: "") }
+    val autoFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching {
+                ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            autoPrefs.edit().putString("tree", uri.toString()).apply()
+            autoFolder = uri.toString()
+            AutoReceiveWorker.schedule(ctx)
+        }
+    }
+    // «Состояние данных»: по нажатию показывает количество товаров, записей истории и размер файлов
+    var storageSub by remember { mutableStateOf("Файлы на устройстве · офлайн") }
 
     fun folderTitle(uri: String): String? = runCatching {
         android.provider.DocumentsContract.getTreeDocumentId(android.net.Uri.parse(uri)).substringAfter(':').ifEmpty { "Память телефона" }
@@ -234,7 +253,8 @@ fun SettingsWindow(env: WinEnv) {
                 HintText("Файлы получают имена вида код_дата_имя-файла. При открытии карточки приложение ищет этот код в папке и показывает найденные фото и PDF.")
             }
 
-            // ----- Интерфейс -----
+            // ----- Интерфейс (в HTML скрыт) -----
+            if (SHOW_HTML_HIDDEN) {
             SectionLabel("Интерфейс")
             Md3Card {
                 SettingsRow(
@@ -242,6 +262,8 @@ fun SettingsWindow(env: WinEnv) {
                     sub = if (virtualKb) "Включена · окно уменьшено" else "Выключена",
                     trailing = { Md3Switch(virtualKb) { virtualKb = it } },
                 )
+            }
+
             }
 
             // ----- Камера -----
@@ -289,7 +311,8 @@ fun SettingsWindow(env: WinEnv) {
                 SoftButton("🔊 Проверить голос", { speakTest() }, Modifier.fillMaxWidth())
             }
 
-            // ----- Внешний сканер -----
+            // ----- Внешний сканер и Wi-Fi сканер (в HTML скрыты) -----
+            if (SHOW_HTML_HIDDEN) {
             SectionLabel("Внешний сканер")
             Md3Card {
                 SettingsRow(
@@ -330,6 +353,8 @@ fun SettingsWindow(env: WinEnv) {
                     }, Modifier.weight(1f))
                 }
                 HintText("Схема: сканер → компьютер → WebSocket на порту 8080 → этот телефон. Bluetooth-сканер продолжает работать отдельно.")
+            }
+
             }
 
             // ----- Python -----
@@ -506,6 +531,13 @@ fun SettingsWindow(env: WinEnv) {
             SectionLabel("Хранилище данных")
             Md3Card {
                 SettingsRow(
+                    icon = "⚡", title = "Папка автоприёма",
+                    sub = folderTitle(autoFolder)?.takeIf { autoFolder.isNotEmpty() }?.let { "Папка: $it" } ?: "Папка для входящих файлов автоприёма",
+                    onClick = { autoFolderPicker.launch(null) },
+                    trailing = { Text("›", fontSize = 22.sp, color = c.onSurfaceVariant) },
+                )
+                RowDivider()
+                SettingsRow(
                     icon = "⏱️", title = "Время проверки папки автоприёма",
                     sub = "Как часто приложение ищет новые файлы в выбранной папке. В фоне, при закрытом приложении, Android разрешает проверку не чаще раза в 15 минут",
                 ) {
@@ -548,6 +580,16 @@ fun SettingsWindow(env: WinEnv) {
                         geminiAttempts, { geminiAttempts = it },
                     )
                 }
+                RowDivider()
+                SettingsRow(
+                    icon = "📊", title = "Состояние данных", sub = storageSub,
+                    onClick = {
+                        val bytes = listOf("my_off_db.json", "my_off_arr6.json")
+                            .sumOf { java.io.File(ctx.applicationContext.filesDir, it).let { f -> if (f.exists()) f.length() else 0L } }
+                        storageSub = "${CatalogStore.items.size} товаров · ${ArrivalStore.items.size} записей истории · ~${"%.1f".format(java.util.Locale.US, bytes / 1024.0)} KB"
+                    },
+                    trailing = { Text("›", fontSize = 22.sp, color = c.onSurfaceVariant) },
+                )
                 RowDivider()
                 SettingsRow(
                     icon = "🔄", title = "Синхронизация с Firebase", sub = "Ещё не выполнялась",
