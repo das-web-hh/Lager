@@ -452,6 +452,84 @@ object InventoryStore {
         saveLocations(ctx); saveEvents(ctx)
     }
 
+    /**
+     * saveInventoryEdit из HTML: правка имени, штрихкода, количества, срока и места одной строки.
+     * Возвращает текст ошибки или null, если всё сохранено. Совпавшая позиция на новом месте объединяется.
+     */
+    fun editItem(
+        ctx: Context,
+        oldAddr: InvAddr,
+        oldKey: String,
+        name: String,
+        barcode: String,
+        quantity: Int,
+        expiry: String,
+        newAddr: InvAddr,
+    ): String? {
+        val n = name.trim()
+        val bc = barcode.replace(Regex("\\s"), "")
+        val exp = expiry.trim()
+        if (n.isEmpty()) return "Введите имя товара"
+        if (quantity < 1) return "Количество должно быть больше нуля"
+        if (exp.isNotEmpty() && parseExpiry(exp) == null) return "Срок: ГГГГ, ГГГГ-ММ или ГГГГ-ММ-ДД"
+        val oi = locations.indexOfFirst { it.addr.key == oldAddr.key }
+        val old = if (oi >= 0) locations[oi].items.firstOrNull { it.key == oldKey } else null
+        if (oi < 0 || old == null) return "Строка уже удалена или недоступна"
+
+        val q = quantity.coerceIn(1, MAX_QTY)
+        val now = System.currentTimeMillis()
+        val withExp = exp.isNotEmpty() || oldKey.contains("|EXP:")
+        val newKey = itemKey(bc, n, if (withExp) exp else null)
+
+        // 1) убрать старую строку
+        locations[oi] = locations[oi].copy(items = locations[oi].items.filter { it.key != oldKey }, updatedAt = now)
+
+        // 2) положить на новое место (с объединением при совпадении ключа)
+        val ti = locations.indexOfFirst { it.addr.key == newAddr.key }
+        val collision = if (ti >= 0) locations[ti].items.firstOrNull { it.key == newKey } else null
+        val updated = if (collision != null) {
+            collision.copy(
+                quantity = minOf(MAX_QTY, collision.quantity + q),
+                name = n, barcode = bc, expiry = exp, expiryMode = expiryModeOf(exp), lastSeen = now,
+            )
+        } else {
+            old.copy(
+                key = newKey, name = n, barcode = bc, quantity = q,
+                expiry = exp, expiryMode = expiryModeOf(exp), lastSeen = now,
+            )
+        }
+        if (ti >= 0) {
+            locations[ti] = locations[ti].copy(
+                items = locations[ti].items.filter { it.key != newKey } + updated,
+                updatedAt = now,
+            )
+        } else {
+            locations.add(InvLoc(newAddr, now, listOf(updated)))
+        }
+
+        // 3) пустое старое место удаляется, если адрес поменялся
+        if (newAddr.key != oldAddr.key) {
+            locations.removeAll { it.addr.key == oldAddr.key && it.items.isEmpty() }
+        }
+
+        // 4) события сканирования переписываются на новые значения
+        for (j in events.indices) {
+            val e = events[j]
+            if (e.addr.key == oldAddr.key && e.barcode == old.barcode && e.expiry == old.expiry) {
+                events[j] = e.copy(addr = newAddr, barcode = bc, name = n, expiry = exp)
+            }
+        }
+
+        // 5) каталог: имя по штрихкоду обновляется, новый штрихкод добавляется
+        if (bc.isNotEmpty()) {
+            val inCatalog = CatalogStore.findByBarcode(bc)
+            if (inCatalog != null) CatalogStore.update(ctx, inCatalog.id, n, inCatalog.ean, inCatalog.artikel)
+            else CatalogStore.ensure(ctx, n, bc)
+        }
+        saveLocations(ctx); saveEvents(ctx)
+        return null
+    }
+
     // ---------- очистка мест из настроек (clearInventoryScope) ----------
 
     /** Части адреса, доступные для очистки: warehouse → row → floor → shelf. */

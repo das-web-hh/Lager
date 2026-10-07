@@ -179,7 +179,7 @@ fun ProductCardWindow(env: WinEnv) {
         card.name.ifEmpty { "–" },
         footer = {
             LongButton("📄 Накладная", LongKind.Blue, {
-                if (docs.isEmpty()) env.info("Накладная не прикреплена") else openFile(docs.first())
+                InvoiceState.show(env.nav, docs)
             })
             SoftButton("Закрыть", { env.nav.pop() }, Modifier.fillMaxWidth())
         },

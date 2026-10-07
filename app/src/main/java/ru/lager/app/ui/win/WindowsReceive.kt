@@ -225,6 +225,7 @@ fun ReceiveManualWindow(env: WinEnv) {
     var saving by remember { mutableStateOf(false) }
     var seq by remember { mutableStateOf(0L) }
     var scanning by remember { mutableStateOf(false) }
+    var unknownEan by remember { mutableStateOf<String?>(null) }
     val focus = remember { FocusRequester() }
     val rcvCtx = LocalContext.current
 
@@ -249,15 +250,23 @@ fun ReceiveManualWindow(env: WinEnv) {
         if (q.isEmpty()) return
         val isEan = q.length >= 8 && q.all { ch -> ch.isDigit() }
         val found = if (isEan) CatalogStore.findByBarcode(q) else null
-        addItem(found?.name ?: if (isEan) "Товар $q" else q, if (isEan) q else "")
+        if (isEan && found == null) {
+            unknownEan = q
+        } else {
+            addItem(found?.name ?: q, if (isEan) q else "")
+        }
         query = ""
     }
 
     // Скан: штрихкод из каталога даёт название товара, иначе «Товар <EAN>».
     fun addScanned(code: String) {
         val found = CatalogStore.findByBarcode(code)
-        addItem(found?.name ?: "Товар $code", code)
-        env.info(found?.name ?: "Штрихкод $code не найден в каталоге")
+        if (found == null) {
+            unknownEan = code
+        } else {
+            addItem(found.name, code)
+            env.info(found.name)
+        }
     }
 
     val totalQty = items.fold(0) { acc, i -> acc + i.qty }
@@ -271,6 +280,19 @@ fun ReceiveManualWindow(env: WinEnv) {
         BarcodeScannerDialog(
             onResult = { code -> scanning = false; addScanned(code) },
             onDismiss = { scanning = false },
+        )
+    }
+
+    unknownEan?.let { ean ->
+        RcvUnknownNameDialog(
+            ean = ean,
+            onSkip = { unknownEan = null },
+            onSave = { name ->
+                CatalogStore.ensure(rcvCtx, name, ean)
+                addItem(name, ean)
+                env.info("Добавлено в каталог и в приёмку: $name")
+                unknownEan = null
+            },
         )
     }
 
@@ -1844,5 +1866,56 @@ fun AutoReceiveWindow(env: WinEnv) {
                 }
             }
         }
+    }
+}
+
+
+// ---------- Товар не найден (#receiveUnknownNameModal) ----------
+
+@Composable
+private fun RcvUnknownNameDialog(ean: String, onSkip: () -> Unit, onSave: (String) -> Unit) {
+    val c = Md3.c
+    var name by remember(ean) { mutableStateOf("") }
+    var error by remember(ean) { mutableStateOf("") }
+    // Подсказки из каталога: от трёх букв, не больше 8 (receiveUnknownNameInputChanged).
+    val suggestions = remember(name) {
+        if (name.trim().length < 3) emptyList() else CatalogStore.search(name).take(8)
+    }
+    val save = {
+        val n = name.trim()
+        if (n.isEmpty()) {
+            error = "Введите название товара"
+        } else {
+            onSave(n)
+        }
+    }
+    DialogCard(
+        title = "Товар не найден",
+        onDismiss = onSkip,
+        actions = {
+            DialogActionCancel("Пропустить", onSkip)
+            DialogActionConfirm("Добавить в приёмку", { save() })
+        },
+    ) {
+        Text(
+            "Введите название товара. После сохранения он появится в каталоге и будет добавлен в приёмку.",
+            fontSize = 14.sp, color = c.onSurfaceVariant,
+        )
+        Text("EAN: $ean", fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
+        LabeledInput("", name, { name = it; error = "" }, placeholder = "Название товара")
+        suggestions.forEach { item ->
+            Text(
+                item.name + if (item.ean.isNotEmpty()) " · ${item.ean}" else "",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(c.surfaceLow)
+                    .md3Clickable { name = item.name; error = "" }
+                    .padding(12.dp),
+            )
+        }
+        if (error.isNotEmpty()) StatusLine(error, StatusKind.Err, Modifier.fillMaxWidth())
     }
 }

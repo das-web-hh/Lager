@@ -51,6 +51,7 @@ fun InventoryWindow(env: WinEnv) {
     var settingsPicker by remember { mutableStateOf(false) }
     var expiryItem by remember { mutableStateOf<Pair<InvLoc, InvItem>?>(null) }
     var qrFor by remember { mutableStateOf<InvLoc?>(null) }
+    var rowEdit by remember { mutableStateOf<Pair<InvLoc, InvItem>?>(null) }
 
     LaunchedEffect(Unit) {
         CatalogStore.load(ctx)
@@ -187,6 +188,10 @@ fun InventoryWindow(env: WinEnv) {
                                             .padding(vertical = 3.dp),
                                     )
                                 }
+                                Box(
+                                    Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).md3Clickable { rowEdit = loc to item },
+                                    contentAlignment = Alignment.Center,
+                                ) { Text("✎", fontSize = 17.sp, color = c.onSurfaceVariant) }
                                 val shape = RoundedCornerShape(8.dp)
                                 Box(
                                     Modifier
@@ -382,6 +387,25 @@ fun InventoryWindow(env: WinEnv) {
                 deleteLoc = null
             },
             onNo = { deleteLoc = null },
+        )
+    }
+
+    rowEdit?.let { (loc, item) ->
+        InvRowEditDialog(
+            loc = loc,
+            item = item,
+            onDismiss = { rowEdit = null },
+            onSave = { name, barcode, qty, expiry, addr ->
+                val err = InventoryStore.editItem(ctx, loc.addr, item.key, name, barcode, qty, expiry, addr)
+                if (err == null) {
+                    if (InventoryStore.current?.key == loc.addr.key && addr.key != loc.addr.key) {
+                        InventoryStore.setCurrent(ctx, addr)
+                    }
+                    status = "Строка изменена: ${name.trim()}"; statusErr = false
+                    rowEdit = null
+                }
+                err
+            },
         )
     }
 
@@ -928,5 +952,59 @@ fun ImportExportSheet(env: WinEnv) {
                 if (!ExportHelper.share(ctx, "warehouse_backup_${ExportHelper.stamp()}.json", json.toByteArray(), ExportHelper.JSON)) env.info("Не удалось поделиться файлом")
             }
         }
+    }
+}
+
+
+// ---------- Изменить строку (#inventoryEditModal) ----------
+
+@Composable
+private fun InvRowEditDialog(
+    loc: InvLoc,
+    item: InvItem,
+    onDismiss: () -> Unit,
+    onSave: (name: String, barcode: String, qty: Int, expiry: String, addr: InvAddr) -> String?,
+) {
+    var name by remember(item.key) { mutableStateOf(item.name) }
+    var barcode by remember(item.key) { mutableStateOf(item.barcode) }
+    var qty by remember(item.key) { mutableStateOf(item.quantity.toString()) }
+    var expiry by remember(item.key) { mutableStateOf(item.expiry) }
+    var warehouse by remember(item.key) { mutableStateOf(loc.addr.warehouse) }
+    var row by remember(item.key) { mutableStateOf(loc.addr.row) }
+    var floor by remember(item.key) { mutableStateOf(loc.addr.floor) }
+    var shelf by remember(item.key) { mutableStateOf(loc.addr.shelf) }
+    var error by remember(item.key) { mutableStateOf("") }
+
+    val save = {
+        val addr = InventoryStore.build(warehouse, row, floor, shelf)
+        if (addr == null) {
+            error = "Заполните склад, ряд, этаж и полку"
+        } else {
+            val q = (qty.trim().toIntOrNull() ?: 0).coerceIn(0, InventoryStore.MAX_QTY)
+            error = onSave(name, barcode, q, expiry, addr).orEmpty()
+        }
+    }
+
+    DialogCard(
+        title = "Изменить строку",
+        onDismiss = onDismiss,
+        actions = {
+            DialogActionCancel("Отмена", onDismiss)
+            DialogActionConfirm("Сохранить", { save() })
+        },
+    ) {
+        LabeledInput("Имя товара", name, { name = it; error = "" })
+        LabeledInput("Штрихкод", barcode, { barcode = it; error = "" }, keyboardType = KeyboardType.Number)
+        LabeledInput("Количество", qty, { v -> qty = v.filter { it.isDigit() }.take(5); error = "" }, keyboardType = KeyboardType.Number)
+        LabeledInput("Срок годности", expiry, { expiry = it; error = "" }, placeholder = "ГГГГ, ГГГГ-ММ или ГГГГ-ММ-ДД")
+        FieldLabel("Место хранения")
+        LabeledInput("Склад", warehouse, { warehouse = it; error = "" })
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LabeledInput("Ряд", row, { row = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+            LabeledInput("Этаж", floor, { floor = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+            LabeledInput("Полка", shelf, { shelf = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+        }
+        HintText("«--» — часть адреса не задана.")
+        if (error.isNotEmpty()) StatusLine(error, StatusKind.Err, Modifier.fillMaxWidth())
     }
 }

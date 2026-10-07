@@ -181,7 +181,13 @@ fun HistoryWindow(env: WinEnv) {
                         .clip(RoundedCornerShape(10.dp))
                         .background(c.surfaceHigh)
                         .md3Clickable {
-                            if (!AttachmentStore.open(ctx, f)) Toast.makeText(ctx, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                            if (f.kind == AttachmentStore.KIND_DOC) {
+                                val docs = files.filter { it.kind == AttachmentStore.KIND_DOC }
+                                attBatch = null
+                                InvoiceState.show(env.nav, docs, docs.indexOf(f).coerceAtLeast(0))
+                            } else if (!AttachmentStore.open(ctx, f)) {
+                                Toast.makeText(ctx, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                            }
                         }
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
