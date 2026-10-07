@@ -654,9 +654,21 @@ private class NrProduct(val id: Long, val name: String, val plan: Int) {
     var ean: String = ""
 }
 
+/** Состояние задачи реестра «Приёма по имени» (HTML: rec.task.state). */
+private enum class NrTaskState { Ready, Queued, Processing, Error }
+
+/** Лимит незавершённых задач и число одновременных распознаваний (HTML: MAX_TASKS, PARALLEL). */
+private const val NR_MAX_TASKS = 10
+private const val NR_PARALLEL = 3
+
 private class NrBatch(val id: Long, val title: String) {
     /** Идентификатор записи в «Истории сканирований». */
     val histId: String = "nrh_" + java.util.UUID.randomUUID().toString().take(10)
+    var taskState by mutableStateOf(NrTaskState.Ready)
+    var progress by mutableStateOf("")
+    var taskError by mutableStateOf("")
+    /** Исходный файл для распознавания и повтора. */
+    var source: Uri? = null
     val products = mutableStateListOf<NrProduct>()
     var saved by mutableStateOf(false)
     val docs = mutableStateListOf<Uri>()
@@ -739,6 +751,7 @@ fun ReceiveNameWindow(env: WinEnv) {
     var qtyEdit by remember { mutableStateOf<Pair<NrProduct, Boolean>?>(null) } // true = брак
     var deleteAsk by remember { mutableStateOf<NrProduct?>(null) }
     var addOpen by remember { mutableStateOf(false) }
+    var deleteBatchAsk by remember { mutableStateOf<NrBatch?>(null) }
 
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { CatalogStore.load(ctx) }
@@ -757,64 +770,116 @@ fun ReceiveNameWindow(env: WinEnv) {
         )
     }
 
+    val gate = remember { kotlinx.coroutines.sync.Semaphore(NR_PARALLEL) }
+
+    fun fillFrom(b: NrBatch, inv: NrInvoiceResult) {
+        b.sender = inv.sender
+        b.order = inv.order
+        b.products.clear()
+        inv.items.forEach { (name, qty, ean) ->
+            seq += 1
+            b.products.add(NrProduct(seq, name, qty).also { p -> p.ean = ean })
+        }
+    }
+
+    /** run() из HTML: одна задача реестра. Не больше NR_PARALLEL одновременно, остальные «В очереди». */
+    fun runTask(b: NrBatch) {
+        val u = b.source ?: return
+        b.taskState = NrTaskState.Queued
+        b.progress = "В очереди…"
+        b.taskError = ""
+        scope.launch {
+            gate.acquire()
+            try {
+                if (b !in batches) return@launch // карточку удалили, пока ждала
+                b.taskState = NrTaskState.Processing
+                b.progress = "Подготовка страниц…"
+                try {
+                    val inv = NrInvoice.recognize(ctx, u, b.title) { msg -> if (b in batches) b.progress = msg }
+                    if (b !in batches) return@launch // карточку удалили во время распознавания
+                    if (inv.items.isEmpty()) throw IllegalStateException("Gemini не нашёл товаров в документе.")
+                    fillFrom(b, inv)
+                    b.taskState = NrTaskState.Ready
+                    b.progress = ""
+                    logHist(b, "recognized")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (b !in batches) return@launch
+                    val msg = e.message ?: "Не удалось распознать документ."
+                    b.taskState = NrTaskState.Error
+                    b.taskError = msg
+                    b.progress = ""
+                    logHist(b, "error", msg)
+                }
+            } finally {
+                gate.release()
+            }
+        }
+    }
+
     fun importUris(uris: List<Uri>) {
-        if (uris.isNotEmpty()) {
-            scope.launch {
-                var last: NrBatch? = null
-                var note = ""
-                var loaded = 0
-                uris.forEach { u ->
-                    val title = rcvDisplayName(ctx, u)
-                    seq += 1
-                    val b = NrBatch(seq, title)
-                    if (NrInvoice.isRecognizable(title)) {
-                        env.info("Gemini распознаёт «$title»…")
-                        try {
-                            val inv = NrInvoice.recognize(ctx, u, title) { env.info(it) }
-                            if (inv.items.isEmpty()) {
-                                note = "Gemini не нашёл товаров в «$title» — добавляйте товары кнопкой «+»"
-                                logHist(b, "error", "Gemini не нашёл товаров в документе")
-                            } else {
-                                b.sender = inv.sender
-                                b.order = inv.order
-                                inv.items.forEach { (name, qty, ean) ->
-                                    seq += 1
-                                    b.products.add(NrProduct(seq, name, qty).also { p -> p.ean = ean })
-                                }
-                                loaded += inv.items.size
-                                logHist(b, "recognized")
-                            }
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            note = e.message ?: "Не удалось распознать «$title»"
-                            logHist(b, "error", note)
-                        }
+        if (uris.isEmpty()) return
+        val recognizable = uris.filter { NrInvoice.isRecognizable(rcvDisplayName(ctx, it)) }
+        if (recognizable.isNotEmpty() && SettingsStore.geminiKeys(ctx).isEmpty()) {
+            env.info("Сначала добавьте API-ключ Gemini в настройках.")
+            return
+        }
+        val free = maxOf(0, NR_MAX_TASKS - batches.count { !it.saved })
+        if (free == 0) {
+            env.info("В реестре уже $NR_MAX_TASKS задач. Завершите или удалите одну из них.")
+            return
+        }
+        val accepted = uris.take(free)
+        val skipped = uris.size - accepted.size
+        scope.launch {
+            var last: NrBatch? = null
+            var note = ""
+            var loaded = 0
+            var queued = 0
+            accepted.forEach { u ->
+                val title = rcvDisplayName(ctx, u)
+                seq += 1
+                val b = NrBatch(seq, title)
+                if (NrInvoice.isRecognizable(title)) {
+                    b.source = u
+                    b.sender = title
+                    b.order = ""
+                    batches.add(b)
+                    queued += 1
+                    runTask(b)
+                } else {
+                    // Excel/CSV читается сразу и сразу готов (HTML: registerCurrent).
+                    val table = withContext(Dispatchers.IO) {
+                        runCatching { TableReader.read(ctx, u, title) }.getOrNull()
+                    }
+                    val rows = table?.let { nrParseTable(it) }
+                    table?.let { b.sender = nrFindSender(it) }
+                    if (rows.isNullOrEmpty()) {
+                        note = "В «$title» не найден столбец с наименованием — добавляйте товары кнопкой «+»"
+                        logHist(b, "error", "Не найден столбец с наименованием")
                     } else {
-                        val table = withContext(Dispatchers.IO) {
-                            runCatching { TableReader.read(ctx, u, title) }.getOrNull()
+                        rows.forEach { (name, plan, ean) ->
+                            seq += 1
+                            b.products.add(NrProduct(seq, name, plan).also { it.ean = ean })
                         }
-                        val rows = table?.let { nrParseTable(it) }
-                        table?.let { b.sender = nrFindSender(it) }
-                        if (rows.isNullOrEmpty()) {
-                            note = "В «$title» не найден столбец с наименованием — добавляйте товары кнопкой «+»"
-                            logHist(b, "error", "Не найден столбец с наименованием")
-                        } else {
-                            rows.forEach { (name, plan, ean) ->
-                                seq += 1
-                                b.products.add(NrProduct(seq, name, plan).also { it.ean = ean })
-                            }
-                            loaded += rows.size
-                            logHist(b, "recognized")
-                        }
+                        loaded += rows.size
+                        logHist(b, "recognized")
                     }
                     batches.add(b)
-                    last = b
                 }
+                last = b
+            }
+            // Одна таблица откроется сразу; пачка накладных остаётся списком задач на стартовом экране.
+            if (queued == 0) {
                 active = last
                 screen = 1
-                env.info(if (loaded > 0) "Загружено позиций: $loaded" else note)
             }
+            val parts = ArrayList<String>()
+            if (queued > 0) parts.add("Добавлено в реестр: $queued")
+            if (loaded > 0) parts.add("Загружено позиций: $loaded")
+            if (skipped > 0) parts.add("Не добавлено $skipped: лимит $NR_MAX_TASKS задач")
+            env.info(if (parts.isNotEmpty()) parts.joinToString(". ") else note)
         }
     }
 
@@ -920,6 +985,8 @@ fun ReceiveNameWindow(env: WinEnv) {
                             )
                         },
                         onOpen = { b -> active = b; screen = 1 },
+                        onRetry = { b -> runTask(b) },
+                        onDelete = { b -> deleteBatchAsk = b },
                         onHistory = { env.nav.push(Win.NrHistory) },
                     )
                 } else if (screen == 1) {
@@ -1060,6 +1127,29 @@ fun ReceiveNameWindow(env: WinEnv) {
         }
     }
 
+    deleteBatchAsk?.let { b ->
+        DialogCard(
+            title = "Удаление накладной",
+            onDismiss = { deleteBatchAsk = null },
+            actions = {
+                DialogActionCancel("Нет") { deleteBatchAsk = null }
+                DialogActionConfirm(
+                    "Да",
+                    {
+                        // onDeleted из HTML: в историю пишется «удалено», только если было что терять.
+                        if (b.taskState == NrTaskState.Ready && b.products.isNotEmpty()) logHist(b, "deleted")
+                        if (active === b) { active = null; screen = 0 }
+                        batches.remove(b)
+                        deleteBatchAsk = null
+                    },
+                    danger = true,
+                )
+            },
+        ) {
+            Text("Удалить «${b.title}» из реестра?", fontSize = 14.sp, color = c.onSurface)
+        }
+    }
+
     deleteAsk?.let { p ->
         DialogCard(
             title = "Удаление товара",
@@ -1128,6 +1218,8 @@ private fun NrStart(
     batches: List<NrBatch>,
     onPick: () -> Unit,
     onOpen: (NrBatch) -> Unit,
+    onRetry: (NrBatch) -> Unit,
+    onDelete: (NrBatch) -> Unit,
     onHistory: () -> Unit,
 ) {
     val c = Md3.c
@@ -1204,13 +1296,37 @@ private fun NrStart(
                         val total = b.products.size
                         val matched = b.products.count { it.actual == it.plan && it.damage == 0 && it.actual > 0 }
                         val complete = total > 0 && matched == total
+                        val st = b.taskState
+                        val ready = st == NrTaskState.Ready
+                        val label = when (st) {
+                            NrTaskState.Queued -> "В очереди"
+                            NrTaskState.Processing -> "Распознаётся"
+                            NrTaskState.Error -> "Ошибка"
+                            NrTaskState.Ready -> if (b.saved) "Сохранено" else if (complete) "Завершено" else "В работе"
+                        }
+                        val fg = when (st) {
+                            NrTaskState.Error -> c.error
+                            NrTaskState.Ready -> if (b.saved || complete) c.success else c.warning
+                            else -> c.onPrimaryContainer
+                        }
+                        val bg = when (st) {
+                            NrTaskState.Error -> c.errorContainer
+                            NrTaskState.Ready -> if (b.saved || complete) c.successContainer else c.warningContainer
+                            else -> c.primaryContainer
+                        }
                         Column(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RcvR14)
                                 .background(c.card)
                                 .border(1.dp, c.outlineVariant, RcvR14)
-                                .md3Clickable { onOpen(b) }
+                                .md3Clickable {
+                                    when (st) {
+                                        NrTaskState.Ready -> onOpen(b)
+                                        NrTaskState.Error -> onRetry(b)
+                                        else -> {}
+                                    }
+                                }
                                 .padding(horizontal = 14.dp, vertical = 13.dp),
                         ) {
                             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1224,22 +1340,46 @@ private fun NrStart(
                                     modifier = Modifier.weight(1f),
                                 )
                                 Text(
-                                    if (complete) "Завершено" else "В работе",
+                                    label,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = if (complete) c.success else c.warning,
+                                    color = fg,
                                     modifier = Modifier
                                         .clip(RcvR10)
-                                        .background(if (complete) c.successContainer else c.warningContainer)
+                                        .background(bg)
                                         .padding(horizontal = 7.dp, vertical = 4.dp),
                                 )
+                                Text(
+                                    "✕",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = c.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .md3Clickable { onDelete(b) }
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
                             }
-                            Text(
-                                "$total поз. · совпало $matched",
-                                fontSize = 11.sp,
-                                color = c.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 8.dp),
-                            )
+                            when (st) {
+                                NrTaskState.Ready -> Text(
+                                    "$total поз. · совпало $matched",
+                                    fontSize = 11.sp,
+                                    color = c.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                                NrTaskState.Error -> Text(
+                                    b.taskError + " Нажмите, чтобы повторить.",
+                                    fontSize = 11.sp,
+                                    color = c.error,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                                else -> Text(
+                                    b.progress,
+                                    fontSize = 11.sp,
+                                    color = c.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                            }
                         }
                     }
                 }
