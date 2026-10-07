@@ -52,6 +52,8 @@ fun InventoryWindow(env: WinEnv) {
     var expiryItem by remember { mutableStateOf<Pair<InvLoc, InvItem>?>(null) }
     var qrFor by remember { mutableStateOf<InvLoc?>(null) }
     var rowEdit by remember { mutableStateOf<Pair<InvLoc, InvItem>?>(null) }
+    var addrEdit by remember { mutableStateOf<InvLoc?>(null) }
+    var mergeAsk by remember { mutableStateOf<Pair<InvLoc, InvAddr>?>(null) }
 
     LaunchedEffect(Unit) {
         CatalogStore.load(ctx)
@@ -159,6 +161,10 @@ fun InventoryWindow(env: WinEnv) {
                                     fontSize = 11.sp, color = c.onSurfaceVariant,
                                 )
                             }
+                            Box(
+                                Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).md3Clickable { addrEdit = loc },
+                                contentAlignment = Alignment.Center,
+                            ) { Text("✎", fontSize = 20.sp, color = c.primary) }
                             Box(
                                 Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).md3Clickable { qrFor = loc },
                                 contentAlignment = Alignment.Center,
@@ -388,6 +394,47 @@ fun InventoryWindow(env: WinEnv) {
             },
             onNo = { deleteLoc = null },
         )
+    }
+
+    addrEdit?.let { loc ->
+        InvAddrEditDialog(
+            loc = loc,
+            onDismiss = { addrEdit = null },
+            onSave = { next ->
+                if (next.key == loc.addr.key) {
+                    addrEdit = null
+                } else if (InventoryStore.locations.any { it.addr.key == next.key }) {
+                    mergeAsk = loc to next
+                } else {
+                    InventoryStore.moveLocation(ctx, loc.addr, next)
+                    status = "Адрес изменён: ${next.label}"; statusErr = false
+                    addrEdit = null
+                }
+            },
+        )
+    }
+
+    mergeAsk?.let { (loc, next) ->
+        val dest = InventoryStore.locations.firstOrNull { it.addr.key == next.key }
+        DialogCard(
+            title = "Адрес уже существует",
+            onDismiss = { mergeAsk = null },
+            actions = {
+                DialogActionCancel("Нет") { mergeAsk = null }
+                DialogActionConfirm("Да, объединить", {
+                    InventoryStore.moveLocation(ctx, loc.addr, next)
+                    status = "Адрес изменён: ${next.label}"; statusErr = false
+                    mergeAsk = null
+                    addrEdit = null
+                })
+            },
+        ) {
+            Text("↔", fontSize = 32.sp, color = c.primary, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+            Text(
+                "Адрес ${next.label} уже есть. Объединить товары? (${loc.items.size} + ${dest?.items?.size ?: 0} позиций)",
+                fontSize = 14.sp, color = c.onSurfaceVariant,
+            )
+        }
     }
 
     rowEdit?.let { (loc, item) ->
@@ -1005,6 +1052,46 @@ private fun InvRowEditDialog(
             LabeledInput("Полка", shelf, { shelf = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
         }
         HintText("«--» — часть адреса не задана.")
+        if (error.isNotEmpty()) StatusLine(error, StatusKind.Err, Modifier.fillMaxWidth())
+    }
+}
+
+
+// ---------- Изменить адрес (#inventoryAddressEditModal) ----------
+
+@Composable
+private fun InvAddrEditDialog(loc: InvLoc, onDismiss: () -> Unit, onSave: (InvAddr) -> Unit) {
+    val key = loc.addr.key
+    var warehouse by remember(key) { mutableStateOf(loc.addr.warehouse) }
+    var row by remember(key) { mutableStateOf(loc.addr.row) }
+    var floor by remember(key) { mutableStateOf(loc.addr.floor) }
+    var shelf by remember(key) { mutableStateOf(loc.addr.shelf) }
+    var error by remember(key) { mutableStateOf("") }
+
+    val save = {
+        val addr = InventoryStore.build(warehouse, row, floor, shelf)
+        if (addr == null) {
+            error = "Заполните склад, ряд, этаж и полку"
+        } else {
+            onSave(addr)
+        }
+    }
+
+    DialogCard(
+        title = "Изменить адрес",
+        onDismiss = onDismiss,
+        actions = {
+            DialogActionCancel("Отмена", onDismiss)
+            DialogActionConfirm("Сохранить", { save() })
+        },
+    ) {
+        LabeledInput("Склад", warehouse, { warehouse = it; error = "" })
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LabeledInput("Ряд", row, { row = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+            LabeledInput("Этаж", floor, { floor = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+            LabeledInput("Полка", shelf, { shelf = it; error = "" }, Modifier.weight(1f), keyboardType = KeyboardType.Number)
+        }
+        HintText("Ряд, этаж и полка — числа 1–99 или «--». Все товары места переедут на новый адрес.")
         if (error.isNotEmpty()) StatusLine(error, StatusKind.Err, Modifier.fillMaxWidth())
     }
 }

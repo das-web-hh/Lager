@@ -530,6 +530,48 @@ object InventoryStore {
         return null
     }
 
+    /**
+     * commitInventoryAddressEdit из HTML: переносит все позиции места на новый адрес.
+     * Если новый адрес уже есть — позиции с одинаковым ключом складываются, остальные добавляются.
+     */
+    fun moveLocation(ctx: Context, src: InvAddr, next: InvAddr) {
+        if (src.key == next.key) return
+        val si = locations.indexOfFirst { it.addr.key == src.key }
+        if (si < 0) return
+        val source = locations[si]
+        val now = System.currentTimeMillis()
+        val di = locations.indexOfFirst { it.addr.key == next.key }
+        val merged = if (di >= 0) {
+            val items = locations[di].items.toMutableList()
+            source.items.forEach { s ->
+                val k = items.indexOfFirst { it.key == s.key }
+                if (k >= 0) {
+                    val t = items[k]
+                    items[k] = t.copy(
+                        quantity = minOf(MAX_QTY, t.quantity + s.quantity),
+                        name = if (t.name == UNKNOWN_NAME) s.name else t.name,
+                        lastSeen = maxOf(t.lastSeen, s.lastSeen),
+                        eventCount = t.eventCount + s.eventCount,
+                        legacy = t.legacy + s.legacy,
+                    )
+                } else {
+                    items.add(s)
+                }
+            }
+            locations[di].copy(items = items, updatedAt = now)
+        } else {
+            InvLoc(next, now, source.items)
+        }
+        locations.removeAll { it.addr.key == src.key }
+        val d2 = locations.indexOfFirst { it.addr.key == next.key }
+        if (d2 >= 0) locations[d2] = merged else locations.add(merged)
+        for (j in events.indices) {
+            if (events[j].addr.key == src.key) events[j] = events[j].copy(addr = next)
+        }
+        if (current?.key == src.key) setCurrent(ctx, next)
+        saveLocations(ctx); saveEvents(ctx)
+    }
+
     // ---------- очистка мест из настроек (clearInventoryScope) ----------
 
     /** Части адреса, доступные для очистки: warehouse → row → floor → shelf. */
