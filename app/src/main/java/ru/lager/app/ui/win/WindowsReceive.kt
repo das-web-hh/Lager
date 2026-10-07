@@ -65,6 +65,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
@@ -83,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.lager.app.ui.BarcodeScanIcon
@@ -626,7 +628,8 @@ private fun RcvSaveScreen(env: WinEnv, items: List<RcvItem>, onSaved: () -> Unit
                             )
                             if (photos.isNotEmpty() || docs.isNotEmpty()) {
                                 val ph = photos.toList(); val dc = docs.toList()
-                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc) }
+                                val firstEan = ready.firstOrNull()?.ean.orEmpty()
+                                scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, ph, dc, firstEan) }
                             }
                             // Товары с реальными названиями попадают в каталог; заглушки «Товар <EAN>» — нет.
                             ready.forEach {
@@ -661,9 +664,14 @@ private enum class NrTaskState { Ready, Queued, Processing, Error }
 private const val NR_MAX_TASKS = 10
 private const val NR_PARALLEL = 3
 
-private class NrBatch(val id: Long, val title: String) {
+private class NrBatch(
+    val id: Long,
+    val title: String,
     /** Идентификатор записи в «Истории сканирований». */
-    val histId: String = "nrh_" + java.util.UUID.randomUUID().toString().take(10)
+    val histId: String = "nrh_" + java.util.UUID.randomUUID().toString().take(10),
+) {
+    /** День сохранения партии: со сменой дня она уходит из реестра. */
+    var savedDay by mutableStateOf("")
     var taskState by mutableStateOf(NrTaskState.Ready)
     var progress by mutableStateOf("")
     var taskError by mutableStateOf("")
@@ -674,6 +682,29 @@ private class NrBatch(val id: Long, val title: String) {
     val docs = mutableStateListOf<Uri>()
     var sender by mutableStateOf("")
     var order by mutableStateOf("")
+}
+
+private fun NrBatch.toRec() = NrTaskRec(
+    id = id, histId = histId, title = title, sender = sender, order = order,
+    saved = saved, savedDay = savedDay, state = taskState.name, error = taskError, source = source,
+    docs = docs.toList(),
+    products = products.map { NrProdRec(it.id, it.name, it.plan, it.actual, it.damage, it.ean) },
+)
+
+private fun NrTaskRec.toBatch(): NrBatch {
+    val b = NrBatch(id, title, histId.ifEmpty { "nrh_" + java.util.UUID.randomUUID().toString().take(10) })
+    b.sender = sender
+    b.order = order
+    b.saved = saved
+    b.savedDay = savedDay
+    b.taskState = runCatching { NrTaskState.valueOf(state) }.getOrDefault(NrTaskState.Ready)
+    b.taskError = error
+    b.source = source
+    b.docs.addAll(docs)
+    products.forEach { p ->
+        b.products.add(NrProduct(p.id, p.name, p.plan).also { it.actual = p.actual; it.damage = p.damage; it.ean = p.ean })
+    }
+    return b
 }
 
 private fun reportRows(b: NrBatch): List<List<String>> =
@@ -755,6 +786,24 @@ fun ReceiveNameWindow(env: WinEnv) {
 
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { CatalogStore.load(ctx) }
+
+    // Реестр хранится на диске: после перезапуска задачи возвращаются, прерванные становятся ошибкой.
+    var restored by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val recs = withContext(Dispatchers.IO) { NrRegistryStore.load(ctx) }
+        if (batches.isEmpty()) {
+            recs.forEach { batches.add(it.toBatch()) }
+            seq = maxOf(seq, recs.maxOfOrNull { r -> maxOf(r.id, r.products.maxOfOrNull { it.id } ?: 0L) } ?: 0L)
+        }
+        restored = true
+    }
+    LaunchedEffect(restored) {
+        if (!restored) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow { batches.map { it.toRec() } }.collectLatest { recs ->
+            delay(500)
+            withContext(Dispatchers.IO) { NrRegistryStore.save(ctx, recs) }
+        }
+    }
 
     val histUser = listOfNotNull(env.profile?.firstName, env.profile?.lastName)
         .filter { it.isNotBlank() }.joinToString(" ").ifEmpty { env.profile?.email.orEmpty() }
@@ -842,7 +891,7 @@ fun ReceiveNameWindow(env: WinEnv) {
                 seq += 1
                 val b = NrBatch(seq, title)
                 if (NrInvoice.isRecognizable(title)) {
-                    b.source = u
+                    b.source = withContext(Dispatchers.IO) { NrRegistryStore.copyIn(ctx, b.id, u, title) } ?: u
                     b.sender = title
                     b.order = ""
                     batches.add(b)
@@ -883,12 +932,73 @@ fun ReceiveNameWindow(env: WinEnv) {
         }
     }
 
+    // Серия снимков накладной (nrCameraModal): каждый кадр — страница, позиции складываются в одну партию.
+    var camOpen by remember { mutableStateOf(false) }
+    fun importShots(shots: List<Uri>) {
+        if (shots.isEmpty()) return
+        if (batches.count { !it.saved } >= NR_MAX_TASKS) {
+            env.info("В реестре уже $NR_MAX_TASKS задач. Завершите или удалите одну из них.")
+            return
+        }
+        scope.launch {
+            seq += 1
+            val stamp = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.US).format(java.util.Date())
+            val b = NrBatch(seq, "Снимки накладной $stamp")
+            val merged = LinkedHashMap<String, Triple<String, Int, String>>()
+            var failed = ""
+            shots.forEachIndexed { i, u ->
+                env.info("Gemini распознаёт кадр ${i + 1} из ${shots.size}…")
+                try {
+                    val inv = NrInvoice.recognize(ctx, u, "кадр_${i + 1}.jpg") { env.info(it) }
+                    if (b.sender.isEmpty()) b.sender = inv.sender
+                    if (b.order.isEmpty()) b.order = inv.order
+                    inv.items.forEach { (name, qty, ean) ->
+                        val key = name.lowercase().replace(Regex("\\s+"), " ")
+                        val old = merged[key]
+                        merged[key] = if (old != null) Triple(old.first, old.second + qty, old.third.ifEmpty { ean }) else Triple(name, qty, ean)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failed = e.message ?: "Не удалось распознать кадр ${i + 1}"
+                }
+            }
+            merged.values.forEach { (name, qty, ean) ->
+                seq += 1
+                b.products.add(NrProduct(seq, name, qty).also { p -> p.ean = ean })
+            }
+            // снимки прикрепляются к партии как накладные и уходят на Google Диск при сохранении
+            b.docs.addAll(shots.take(AttachmentStore.MAX_DOCS))
+            if (merged.isEmpty()) {
+                logHist(b, "error", failed.ifEmpty { "Gemini не нашёл товаров на снимках" })
+            } else {
+                logHist(b, "recognized")
+            }
+            batches.add(b)
+            active = b
+            screen = 1
+            env.info(
+                when {
+                    merged.isEmpty() -> failed.ifEmpty { "Gemini не нашёл товаров на снимках — добавляйте товары кнопкой «+»" }
+                    failed.isNotEmpty() -> "Загружено позиций: ${merged.size}. Часть кадров не распознана: $failed"
+                    else -> "Загружено позиций: ${merged.size}"
+                },
+            )
+        }
+    }
+    if (camOpen) {
+        NrCameraDialog(
+            onDone = { camOpen = false; importShots(it) },
+            onDismiss = { camOpen = false },
+        )
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> importUris(uris) }
 
     // Файлы из Android «Поделиться» → «Приём по имени»
-    LaunchedEffect(ShareState.nameQueue) {
+    LaunchedEffect(ShareState.nameQueue, restored) {
         val q = ShareState.nameQueue
-        if (q.isNotEmpty()) {
+        if (restored && q.isNotEmpty()) {
             ShareState.nameQueue = emptyList()
             importUris(q)
         }
@@ -950,6 +1060,7 @@ fun ReceiveNameWindow(env: WinEnv) {
             scope.launch(Dispatchers.IO) { AttachmentStore.save(ctx, batchId, emptyList(), dc) }
         }
         b.saved = true
+        b.savedDay = NrRegistryStore.dayKey()
         logHist(b, "saved", "Партия сохранена: ${rows.size} поз.", batchId)
         env.info("Партия сохранена: ${rows.size} позиций, $total шт.")
     }
@@ -974,6 +1085,7 @@ fun ReceiveNameWindow(env: WinEnv) {
                 if (screen == 0 || list == null) {
                     NrStart(
                         batches = batches,
+                        onCamera = { camOpen = true },
                         onPick = {
                             picker.launch(
                                 arrayOf(
@@ -1217,6 +1329,7 @@ private fun NrProgress(pct: Int, done: Int, total: Int) {
 private fun NrStart(
     batches: List<NrBatch>,
     onPick: () -> Unit,
+    onCamera: () -> Unit,
     onOpen: (NrBatch) -> Unit,
     onRetry: (NrBatch) -> Unit,
     onDelete: (NrBatch) -> Unit,
@@ -1254,6 +1367,30 @@ private fun NrStart(
             Text("📁", fontSize = 40.sp)
             Text("Выбрать файл", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = c.onSurface, modifier = Modifier.padding(top = 6.dp))
             Text("Excel или PDF", fontSize = 13.sp, color = c.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+        }
+
+        // nr-camera-btn: серия снимков накладной
+        Row(
+            Modifier
+                .widthIn(max = 420.dp)
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+                .heightIn(min = 52.dp)
+                .clip(RcvR16)
+                .background(Brush.linearGradient(listOf(Color(0xFFF08C00), Color(0xFFD9480F))))
+                .md3Clickable(color = Color.White, onClick = onCamera)
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Text("📷", fontSize = 20.sp)
+            Text(
+                "Снять накладную",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color.White,
+                modifier = Modifier.padding(start = 10.dp),
+            )
         }
 
         Column(Modifier.widthIn(max = 420.dp).fillMaxWidth().padding(top = 24.dp)) {

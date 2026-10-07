@@ -18,6 +18,8 @@ class LagerApp : Application() {
                 .build()
             FirebaseApp.initializeApp(this, options)
         }
+        // Очередь отправки накладных и фото на Google Диск
+        ru.lager.app.ui.win.DriveOutbox.start(this)
         AutoReceiveWorker.schedule(this)
     }
 }

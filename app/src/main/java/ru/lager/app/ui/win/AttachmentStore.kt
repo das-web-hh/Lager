@@ -54,7 +54,7 @@ object AttachmentStore {
 
     /** Копирует выбранные файлы в хранилище партии. Возвращает, сколько сохранено. */
     @Synchronized
-    fun save(ctx: Context, batchId: String, photos: List<Uri>, docs: List<Uri>): Int {
+    fun save(ctx: Context, batchId: String, photos: List<Uri>, docs: List<Uri>, ean: String = ""): Int {
         val app = ctx.applicationContext
         val dir = File(app.filesDir, "attachments/$batchId").apply { mkdirs() }
         val added = ArrayList<Attachment>()
@@ -77,6 +77,8 @@ object AttachmentStore {
                 arr.put(JSONObject().put("batchId", it.batchId).put("kind", it.kind).put("name", it.name).put("path", it.path))
             }
             index(app).writeText(arr.toString())
+            // Копии уходят на Google Диск (очередь, если Диск не настроен или нет сети).
+            DriveOutbox.enqueue(app, batchId, added, ean = ean)
         }
         // чистим временные снимки камеры
         File(app.cacheDir, "camera").listFiles()?.forEach { it.delete() }
