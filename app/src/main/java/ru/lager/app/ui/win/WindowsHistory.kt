@@ -41,7 +41,7 @@ import java.util.Locale
 //  История (#historyModal): приёмки по партиям, новые сверху
 // =====================================================================
 
-/** Партия приёмки: строки одной партии (batchId); запись без партии — своя группа. */
+/** Партия приёмки: строки одной партии (batchId); старые записи без партии объединяются по дате, заказу и отправителю. */
 class HistGroup(
     val key: String,
     val batchId: String,
@@ -52,12 +52,41 @@ class HistGroup(
     val rows: List<Arrival>,
 ) {
     val title: String get() = sender.ifEmpty { if (order.isNotEmpty()) "Заказ $order" else "Без отправителя" }
-    val sortKey: Long get() = parseReceivedAt(receivedAt) ?: parseHistDate(date)
-    val timeLabel: String
-        get() {
-            val ms = parseReceivedAt(receivedAt)
-            return if (ms != null) SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.US).format(java.util.Date(ms)) else date.ifEmpty { "—" }
+
+    /** formatDateTimeDMY(receivedAt, date) || date || «—» */
+    val timeLabel: String get() = formatDateTimeDMY(receivedAt, date).ifEmpty { date.ifEmpty { "—" } }
+}
+
+/**
+ * formatDateTimeDMY из HTML: «дд.мм.гг[ чч:мм]» → «дд.мм.гггг[ чч:мм]», ISO-время → «дд.мм.гггг чч:мм»,
+ * иначе исходная строка. Если [value] пусто, берётся [fallback].
+ */
+fun formatDateTimeDMY(value: String, fallback: String = ""): String {
+    val raw = value.trim().ifEmpty { fallback.trim() }
+    if (raw.isEmpty()) return ""
+    val m = Regex("^\\s*(\\d{1,2})[./-](\\d{1,2})[./-](\\d{2,4})(?:[ T]+(\\d{1,2}):(\\d{2}))?").find(raw)
+    if (m != null) {
+        val day = m.groupValues[1].toInt()
+        val month = m.groupValues[2].toInt()
+        val yRaw = m.groupValues[3]
+        val year = if (yRaw.length == 2) 2000 + yRaw.toInt() else yRaw.toInt()
+        val hours = m.groupValues[4].takeIf { it.isNotEmpty() }?.toInt()
+        val minutes = m.groupValues[5].takeIf { it.isNotEmpty() }?.toInt()
+        val ok = runCatching {
+            val cal = java.util.Calendar.getInstance()
+            cal.isLenient = false
+            cal.clear()
+            cal.set(year, month - 1, day, hours ?: 12, minutes ?: 0)
+            cal.timeInMillis
+        }.isSuccess
+        if (ok) {
+            val d = "%02d.%02d.%04d".format(day, month, year)
+            return if (hours == null) d else "$d %02d:%02d".format(hours, minutes ?: 0)
         }
+    }
+    val ms = parseReceivedAt(raw)
+    if (ms != null) return SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.US).format(java.util.Date(ms))
+    return raw
 }
 
 private fun parseReceivedAt(v: String): Long? {
@@ -67,22 +96,27 @@ private fun parseReceivedAt(v: String): Long? {
     }.getOrNull()
 }
 
-/** receivedBatchGroups: группы по batchId, новые сверху. */
+/**
+ * receivedBatchGroups: группы по batchId; старые записи без партии объединяются по «дата|заказ|отправитель».
+ * Порядок как в HTML: сначала по дате накладной (новые сверху), затем по времени приёмки.
+ */
 fun histGroups(list: List<Arrival>): List<HistGroup> {
     val map = LinkedHashMap<String, MutableList<Arrival>>()
-    list.forEach { map.getOrPut(it.batchId.ifEmpty { "single:" + it.id }) { ArrayList() }.add(it) }
+    list.forEach {
+        val key = it.batchId.trim().ifEmpty { "legacy_${it.date}|${it.order}|${it.sender}" }
+        map.getOrPut(key) { ArrayList() }.add(it)
+    }
     return map.map { (key, rows) ->
-        val first = rows.first()
         HistGroup(
             key = key,
-            batchId = first.batchId,
-            date = first.date,
+            batchId = rows.first().batchId.trim(),
+            date = rows.firstOrNull { it.date.isNotEmpty() }?.date.orEmpty(),
             sender = rows.firstOrNull { it.sender.isNotEmpty() }?.sender.orEmpty(),
             order = rows.firstOrNull { it.order.isNotEmpty() }?.order.orEmpty(),
             receivedAt = rows.firstOrNull { it.receivedAt.isNotEmpty() }?.receivedAt.orEmpty(),
             rows = rows,
         )
-    }.sortedByDescending { it.sortKey }
+    }.sortedWith(compareByDescending<HistGroup> { parseHistDate(it.date) }.thenByDescending { it.receivedAt })
 }
 
 /** Сверка по товару: план / факт / брак и пометки (classify из HTML). */
@@ -266,10 +300,19 @@ fun HistoryBatchWindow(env: WinEnv) {
                 sections,
             )
         } else {
+            // printReceivedBatch: № · Товар · EAN · Количество и строка «Итого».
+            val total = group.rows.sumOf { it.menge }
+            val body = group.rows.mapIndexed { i, r ->
+                listOf((i + 1).toString(), r.name.ifEmpty { "—" }, CatalogStore.findByName(r.name)?.ean.orEmpty().ifEmpty { "—" }, r.menge.toString())
+            } + listOf(listOf("", "Итого", "", total.toString()))
             ExportHelper.printTable(
-                ctx, group.title, listOf("Наименование", "Количество"),
-                group.rows.map { listOf(it.name, it.menge.toString()) },
-                listOf(group.order, group.timeLabel).filter { it.isNotBlank() }.joinToString(" · "),
+                ctx, "Список принятых товаров", listOf("№", "Товар", "EAN", "Количество"), body,
+                buildList {
+                    add("Отдел: Abteilung Wareneingang")
+                    add("Дата и время: ${group.timeLabel}")
+                    if (group.order.isNotEmpty()) add("Заказ: ${group.order}")
+                    if (group.sender.isNotEmpty()) add("Отправитель: ${group.sender}")
+                }.joinToString(" · "),
             )
         }
         if (!ok) env.info("Не удалось открыть печать")
@@ -331,7 +374,13 @@ fun HistoryBatchWindow(env: WinEnv) {
                     group.rows.forEach { r ->
                         val shape = RoundedCornerShape(12.dp)
                         Row(
-                            Modifier.fillMaxWidth().clip(shape).background(c.card).border(1.dp, c.outlineVariant, shape).padding(12.dp),
+                            Modifier.fillMaxWidth().clip(shape).background(c.card).border(1.dp, c.outlineVariant, shape)
+                                .md3Clickable {
+                                    // openHistoryBatchItem: карточка товара с этой приёмкой
+                                    val ean = CatalogStore.findByName(r.name)?.ean.orEmpty()
+                                    env.nav.openCard(CardState.build(ean, r.name, r.date, r.batchId))
+                                }
+                                .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(r.name.ifEmpty { "—" }, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.onSurface, modifier = Modifier.weight(1f).padding(end = 8.dp))
