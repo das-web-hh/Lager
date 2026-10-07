@@ -642,6 +642,7 @@ fun MainHomeScreen(
                     }
                 },
         ) {
+            WallpaperLayer(1f - themeT)
             Column(Modifier.fillMaxSize()) {
                 HorizontalPager(
                     state = pagerState,

@@ -327,8 +327,7 @@ private fun NrCameraPreview(onCapture: (ImageCapture) -> Unit, onError: (String)
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                         .build()
                     provider.unbindAll()
-                    val selector =
-                        if (SettingsStore.camera(ctx) == 2) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                    val selector = CameraPick.selector(ctx)
                     runCatching { provider.bindToLifecycle(owner, selector, preview, imageCapture) }
                         .getOrElse {
                             provider.unbindAll()

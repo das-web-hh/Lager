@@ -1079,6 +1079,7 @@ fun ReceiveNameWindow(env: WinEnv) {
         },
     ) {
         Box(Modifier.fillMaxSize()) {
+            NrFxHost(env.lang.code)
             Column(Modifier.fillMaxSize()) {
                 if (screen != 0 && total > 0) NrProgress(pct, done, total)
                 val list = products
@@ -1286,6 +1287,7 @@ fun ReceiveNameWindow(env: WinEnv) {
                     p.damage = v
                     if (p.actual < p.damage) p.actual = p.damage
                 } else {
+                    NrFx.added(v - p.actual)
                     p.actual = maxOf(v, p.damage)
                 }
                 qtyEdit = null
@@ -1743,6 +1745,7 @@ private fun NrRow(
                         p.actual = minOf(99999, p.actual + 1)
                         if (p.actual < p.damage) p.actual = p.damage
                         p.taps += 1
+                        NrFx.tap()
                     }
                 }
                 .heightIn(min = 52.dp)

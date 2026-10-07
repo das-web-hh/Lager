@@ -141,7 +141,7 @@ private fun ScannerCamera(
                         },
                     )
                     provider.unbindAll()
-                    val selector = if (SettingsStore.camera(ctx) == 2) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                    val selector = CameraPick.selector(ctx)
                     val cam = runCatching { provider.bindToLifecycle(owner, selector, preview, analysis) }
                         .getOrElse { provider.unbindAll(); provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis) }
                     camera = cam

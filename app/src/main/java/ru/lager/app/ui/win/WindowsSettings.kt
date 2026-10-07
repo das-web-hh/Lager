@@ -21,6 +21,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.lager.app.ui.Lang
+import ru.lager.app.ui.WallpaperStore
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 
 /** В warehouse.html эти разделы скрыты (display:none): интерфейс, внешний и Wi-Fi сканер. Значения в настройках сохраняются, но не показываются. */
 private const val SHOW_HTML_HIDDEN = false
@@ -45,6 +51,29 @@ private fun PrefRow(title: String, hint: String? = null, control: @Composable ()
             if (hint != null) Text(hint, fontSize = 12.sp, color = c.onSurfaceVariant)
         }
         control()
+    }
+}
+
+@Composable
+private fun WallpaperItem(selected: Boolean, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+    val c = Md3.c
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        Modifier
+            .size(width = 54.dp, height = 76.dp)
+            .clip(shape)
+            .background(c.surfaceLow)
+            .border(if (selected) 2.dp else 1.dp, if (selected) c.primary else c.outlineVariant, shape)
+            .md3Clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+        if (selected) {
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp).clip(CircleShape).background(c.primary),
+                contentAlignment = Alignment.Center,
+            ) { Text("✓", color = Color.White, fontSize = 12.sp) }
+        }
     }
 }
 
@@ -157,25 +186,37 @@ fun SettingsWindow(env: WinEnv) {
     val photoFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree(), pickFolder("photoFolder") { photoFolder = it })
     val docFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree(), pickFolder("docFolder") { docFolder = it })
 
-    // Проверка голоса: TextToSpeech создаётся по требованию и освобождается при закрытии окна.
-    var tts by remember { mutableStateOf<android.speech.tts.TextToSpeech?>(null) }
-    DisposableEffect(Unit) { onDispose { tts?.shutdown() } }
+    // Голос: список голосов Android TTS (движок запускается не сразу — пробуем несколько раз, как в HTML)
+    var voiceName by remember { mutableStateOf(SettingsStore.str(ctx, "voiceName")) }
+    var voiceList by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        repeat(9) {
+            Speech.ensure(ctx)
+            val v = Speech.voices()
+            if (v.isNotEmpty()) {
+                val lang = env.lang.code
+                voiceList = v.sortedWith(
+                    compareByDescending<Pair<String, String>> { it.second.take(2) == lang }.thenBy { it.first },
+                )
+                return@LaunchedEffect
+            }
+            delay(600)
+        }
+    }
     fun speakTest() {
-        val say = (phrase.trim() + " пятнадцать").trim()
-        fun go(t: android.speech.tts.TextToSpeech) {
-            t.language = java.util.Locale("ru", "RU")
-            t.setPitch(pitch)
-            t.setSpeechRate(rate)
-            val b = android.os.Bundle().apply { putFloat(android.speech.tts.TextToSpeech.Engine.KEY_PARAM_VOLUME, volume) }
-            t.speak(say, android.speech.tts.TextToSpeech.QUEUE_FLUSH, b, "lager_test")
+        Speech.speak(ctx, (phrase.trim() + " 15").trim(), Speech.langTag(env.lang.code), force = true)
+    }
+
+    // Камеры, которые видит CameraX; выбранная хранится как "cameraId"
+    var cameraId by remember { mutableStateOf(SettingsStore.str(ctx, "cameraId")) }
+    var cameraList by remember { mutableStateOf<List<CameraPick.Cam>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        runCatching {
+            val f = ProcessCameraProvider.getInstance(ctx)
+            f.addListener({
+                runCatching { cameraList = CameraPick.describe(f.get().availableCameraInfos) }
+            }, ContextCompat.getMainExecutor(ctx))
         }
-        val existing = tts
-        if (existing != null) { go(existing); return }
-        var created: android.speech.tts.TextToSpeech? = null
-        created = android.speech.tts.TextToSpeech(ctx.applicationContext) { status ->
-            if (status == android.speech.tts.TextToSpeech.SUCCESS) created?.let { go(it) } else env.info("Голосовой движок недоступен")
-        }
-        tts = created
     }
 
     fun probe(label: String, block: () -> Result<Int>) {
@@ -199,6 +240,27 @@ fun SettingsWindow(env: WinEnv) {
                 RowDivider()
                 PrefRow("Тема") {
                     SegmentedPill(listOf("Светлая", "Тёмная"), if (env.dark) 1 else 0, { env.setDark(it == 1) })
+                }
+                RowDivider()
+                val wpSel = WallpaperStore.selected(ctx)
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Column {
+                        Text("Фон", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Главное окно · светлая тема", fontSize = 12.sp, color = c.onSurfaceVariant)
+                    }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        WallpaperItem(wpSel == 0, { WallpaperStore.select(ctx, 0) }) {
+                            Text("Нет", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = c.onSurfaceVariant)
+                        }
+                        WallpaperStore.res.forEachIndexed { i, r ->
+                            WallpaperItem(wpSel == i + 1, { WallpaperStore.select(ctx, i + 1) }) {
+                                Image(painterResource(r), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            }
+                        }
+                    }
                 }
                 RowDivider()
                 PrefRow("Фон иконок", "Главный экран") {
@@ -270,9 +332,18 @@ fun SettingsWindow(env: WinEnv) {
             SectionLabel("Камера")
             Md3Card {
                 SettingsRow(
-                    icon = "📷", title = "Камера", sub = "Какая камера используется для сканирования",
+                    icon = "📷", title = "Камера",
+                    sub = if (cameraId.isEmpty()) "Автоматический выбор" else (cameraList.firstOrNull { it.id == cameraId }?.label ?: "Камера ID $cameraId"),
                 ) {
-                    SelectField("", listOf("Автоматический выбор", "Задняя", "Фронтальная"), camera, { camera = it })
+                    SelectField(
+                        "",
+                        listOf("Автоматический выбор") + cameraList.map { it.label },
+                        cameraList.indexOfFirst { it.id == cameraId } + 1,
+                        { i ->
+                            cameraId = if (i == 0) "" else cameraList[i - 1].id
+                            SettingsStore.putStr(ctx, "cameraId", cameraId)
+                        },
+                    )
                 }
             }
 
@@ -293,6 +364,19 @@ fun SettingsWindow(env: WinEnv) {
             CardColumn {
                 HintText("В «Приёме по наименованию» голос называет только последнее число со счётчика, например «пятнадцать».")
                 SelectField("Голос", listOf("Включён", "Выключен"), voiceOn, { voiceOn = it })
+                SelectField(
+                    "Кто говорит (голос)",
+                    listOf("Авто (по языку приложения)") + voiceList.map { "${it.first} (${it.second})" },
+                    voiceList.indexOfFirst { it.first == voiceName } + 1,
+                    { i ->
+                        voiceName = if (i == 0) "" else voiceList[i - 1].first
+                        SettingsStore.putStr(ctx, "voiceName", voiceName)
+                    },
+                )
+                HintText(
+                    if (voiceList.isNotEmpty()) "Озвучка: Android TTS, голосов: ${voiceList.size}"
+                    else "Озвучка: Android TTS подключён, но движок не отдал голоса. Проверьте, что в системе выбран модуль синтеза речи.",
+                )
                 SliderField("Скорость", rate, 0.5f..2f, "%.1f".format(rate)) { rate = it }
                 SliderField("Тембр (высота голоса)", pitch, 0.5f..2f, "%.1f".format(pitch)) { pitch = it }
                 SliderField("Громкость", volume, 0f..1f, "${(volume * 100).toInt()}%") { volume = it }
