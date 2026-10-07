@@ -756,7 +756,7 @@ fun ReceiveNameWindow(env: WinEnv) {
         )
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    fun importUris(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             scope.launch {
                 var last: NrBatch? = null
@@ -794,6 +794,17 @@ fun ReceiveNameWindow(env: WinEnv) {
                 screen = 1
                 env.info(if (loaded > 0) "Загружено позиций: $loaded" else note)
             }
+        }
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> importUris(uris) }
+
+    // Файлы из Android «Поделиться» → «Приём по имени»
+    LaunchedEffect(ShareState.nameQueue) {
+        val q = ShareState.nameQueue
+        if (q.isNotEmpty()) {
+            ShareState.nameQueue = emptyList()
+            importUris(q)
         }
     }
 
@@ -1664,11 +1675,17 @@ fun AutoReceiveWindow(env: WinEnv) {
     var serverKind by remember { mutableStateOf(0) } // 0 нейтрально, 1 успех, 2 ошибка
 
     fun refresh() {
-        val t = treeUri ?: return
-        scope.launch { files = withContext(Dispatchers.IO) { arListFolder(ctx, t) } }
+        val t = treeUri
+        scope.launch {
+            files = withContext(Dispatchers.IO) {
+                val shared = ShareState.saved(ctx).filter { arAllowed(it.name, "") }
+                    .map { ArFile(it.name, "Share Target/" + it.name, Uri.fromFile(it)) }
+                (if (t != null) arListFolder(ctx, t) else emptyList()) + shared
+            }
+        }
     }
 
-    LaunchedEffect(treeUri) { refresh() }
+    LaunchedEffect(treeUri, ShareState.version) { refresh() }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -1866,7 +1883,7 @@ fun AutoReceiveWindow(env: WinEnv) {
                 if (visible.isEmpty()) {
                     Text(
                         when {
-                            treeUri == null -> "Выберите папку, чтобы увидеть её содержимое."
+                            treeUri == null && files.isEmpty() -> "Выберите папку или отправьте файлы через «Поделиться»."
                             files.isEmpty() -> "В выбранной папке пока нет файлов."
                             else -> "Нет файлов с таким статусом."
                         },

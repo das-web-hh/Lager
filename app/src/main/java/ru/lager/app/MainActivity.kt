@@ -1,5 +1,6 @@
 package ru.lager.app
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.os.SystemClock
@@ -12,6 +13,7 @@ import ru.lager.app.auth.AuthViewModel
 import ru.lager.app.auth.Biometrics
 import ru.lager.app.ui.AppRoot
 import ru.lager.app.ui.LagerTheme
+import ru.lager.app.ui.win.ShareState
 
 class MainActivity : FragmentActivity() {
 
@@ -25,6 +27,7 @@ class MainActivity : FragmentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
+        if (savedInstanceState == null) ShareState.handle(this, intent)
         setContent {
             LagerTheme {
                 AppRoot(
@@ -34,6 +37,12 @@ class MainActivity : FragmentActivity() {
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        ShareState.handle(this, intent)
     }
 
     override fun onStop() {

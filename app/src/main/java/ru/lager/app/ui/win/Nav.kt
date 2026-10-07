@@ -96,6 +96,7 @@ class WinEnv(
 @Composable
 fun WindowHost(env: WinEnv) {
     Md3Theme(env.dark) {
+        ShareRouteHost(env)
         env.nav.entries.toList().forEach { entry ->
             key(entry) {
                 if (entry.win == Win.ImportExportSheet) {
