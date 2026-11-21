@@ -11,8 +11,8 @@ android {
         applicationId = "app.wmshelper"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 1
+        versionName = "0.1.0"
     }
 
     // Фиксированный debug-ключ в репозитории: новый APK ставится ПОВЕРХ старого без удаления
