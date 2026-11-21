@@ -49,7 +49,7 @@ class Bridge {
     fun log(line: String) {
         synchronized(items) {
             items.add(line)
-            if (items.size > 500) items.removeAt(0)
+            if (items.size > 200) items.removeAt(0)
         }
     }
 
@@ -284,13 +284,25 @@ class MainActivity : AppCompatActivity() {
   if (window.__wmsHook) return;
   window.__wmsHook = true;
   var sens = /login|logon|auth|token|password|signin|session/i;
+  var noise = /GetStatisticsUpdate|GetDashboardMessage|GetSystemMessage|\.(js|css|png|jpg|gif|svg|ico|woff2?|ttf|map)(\?|$)|coglas-cloud\.com/i;
   function clip(s, n){ if (s == null) return ''; s = String(s).replace(/\s+/g,' '); return s.length > n ? s.slice(0, n) + '...' : s; }
-  function send(method, url, status, req, res){
+  function mask(u){ return String(u).replace(/(access_token|token|password|secret|api_key)=[^&]*/ig, function(m, a){ return a + '=***'; }); }
+  function hn(h){
     try {
+      if (!h) return '';
+      if (Array.isArray(h)) return h.map(function(p){ return p[0]; }).join(',');
+      if (typeof h.forEach === 'function') { var a = []; h.forEach(function(v, k){ a.push(k); }); return a.join(','); }
+      return Object.keys(h).join(',');
+    } catch (e) { return ''; }
+  }
+  function send(method, url, status, req, res, hdrs){
+    try {
+      if (noise.test(url)) return;
       var hide = sens.test(url);
-      var line = new Date().toTimeString().slice(0,8) + ' ' + method + ' ' + status + ' ' + url
-        + (req && !hide ? ' | REQ: ' + clip(req, 400) : '')
-        + (res && !hide ? ' | RES: ' + clip(res, 400) : '');
+      var line = new Date().toTimeString().slice(0,8) + ' ' + method + ' ' + status + ' ' + mask(url)
+        + (hdrs ? ' | HDR: ' + hdrs : '')
+        + (req && !hide ? ' | REQ: ' + clip(req, 1500) : '')
+        + (res && !hide ? ' | RES: ' + clip(res, 1500) : '');
       if (window.WmsBridge) window.WmsBridge.log(line);
     } catch (e) {}
   }
@@ -300,23 +312,25 @@ class MainActivity : AppCompatActivity() {
       var url = (typeof input === 'string') ? input : ((input && input.url) || '');
       var method = (init && init.method) || (input && input.method) || 'GET';
       var body = (init && typeof init.body === 'string') ? init.body : '';
+      var hd = hn(init && init.headers);
       return of.apply(this, arguments).then(function(r){
         try {
-          r.clone().text().then(function(t){ send(method, url, r.status, body, t); })
-            .catch(function(){ send(method, url, r.status, body, ''); });
+          r.clone().text().then(function(t){ send(method, url, r.status, body, t, hd); })
+            .catch(function(){ send(method, url, r.status, body, '', hd); });
         } catch (e) {}
         return r;
       });
     };
   }
-  var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send;
+  var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send, xh = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.open = function(m, u){ this.__m = m; this.__u = u; return xo.apply(this, arguments); };
+  XMLHttpRequest.prototype.setRequestHeader = function(k, v){ (this.__h = this.__h || []).push(k); return xh.apply(this, arguments); };
   XMLHttpRequest.prototype.send = function(b){
     var x = this; var body = (typeof b === 'string') ? b : '';
     x.addEventListener('loadend', function(){
       var t = '';
       try { if (x.responseType === '' || x.responseType === 'text') t = x.responseText; } catch (e) {}
-      send(x.__m || 'GET', x.__u || '', x.status, body, t);
+      send(x.__m || 'GET', x.__u || '', x.status, body, t, (x.__h || []).join(','));
     });
     return xs.apply(this, arguments);
   };
