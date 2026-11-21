@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.text.InputType
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -36,6 +37,9 @@ import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import org.json.JSONTokener
 
 private const val START_URL = "https://stroeh.coglas.com/"
@@ -51,6 +55,13 @@ class Bridge {
             items.add(line)
             if (items.size > 200) items.removeAt(0)
         }
+    }
+
+    var onResult: ((Int, Int, String) -> Unit)? = null
+
+    @JavascriptInterface
+    fun result(id: Int, status: Int, body: String) {
+        onResult?.invoke(id, status, body)
     }
 
     fun dump(): String = synchronized(items) { items.joinToString("\n") }
@@ -93,6 +104,8 @@ class MainActivity : AppCompatActivity() {
         barRow.addView(btn("←") { if (web.canGoBack()) web.goBack() })
         barRow.addView(btn("⟳") { web.reload() })
         barRow.addView(btn("Главная") { web.loadUrl(START_URL) })
+        barRow.addView(btn("Infoscan") { askInfoscan() })
+        barRow.addView(btn("Заказы") { runOrders() })
         barRow.addView(btn("Разведка") { runProbe() })
         barRow.addView(btn("Текст") { runPageText() })
         barRow.addView(btn("Лог") { showLog() })
@@ -131,9 +144,14 @@ class MainActivity : AppCompatActivity() {
         val panelButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         panelButtons.addView(btn("Копировать") { copyPanel() })
         panelButtons.addView(btn("Поделиться") { sharePanel() })
+        panelButtons.addView(btn("Raw") { show(if (lastRaw.isEmpty()) "Пусто" else lastRaw.take(60000)) })
         panelButtons.addView(btn("Очистить лог") { bridge.clear(); toast("Лог очищен") })
         panelButtons.addView(btn("Закрыть") { panel.visibility = View.GONE })
-        panel.addView(panelButtons)
+        val panelButtonsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(panelButtons)
+        }
+        panel.addView(panelButtonsScroll)
         root.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.9f))
 
         setContentView(root)
@@ -155,6 +173,9 @@ class MainActivity : AppCompatActivity() {
             setAcceptThirdPartyCookies(web, true)
         }
 
+        bridge.onResult = { id, status, body ->
+            runOnUiThread { pending.remove(id)?.invoke(status, body) }
+        }
         web.addJavascriptInterface(bridge, "WmsBridge")
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             WebViewCompat.addDocumentStartJavaScript(web, HOOK_JS, setOf("https://stroeh.coglas.com"))
@@ -273,6 +294,262 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(i, "Поделиться"))
     }
 
+    // ---------------- запросы к API сайта (через страницу, с её сессией) ----------------
+
+    private val pending = HashMap<Int, (Int, String) -> Unit>()
+    private var nextId = 1
+    private var lastRaw = ""
+
+    private fun api(method: String, path: String, body: String?, cb: (Int, String) -> Unit) {
+        val id = nextId++
+        pending[id] = cb
+        val js = "(window.__wmsCall ? window.__wmsCall(" + id + "," + JSONObject.quote(method) + "," +
+            JSONObject.quote(path) + "," + (if (body == null) "null" else JSONObject.quote(body)) + ")" +
+            " : (window.WmsBridge && window.WmsBridge.result(" + id + ",-1,'hook')))"
+        web.evaluateJavascript(js, null)
+        web.postDelayed({ pending.remove(id)?.invoke(-2, "") }, 15000)
+    }
+
+    private fun apiError(status: Int, text: String): String = when (status) {
+        -2 -> "Нет ответа за 15 секунд. Проверьте интернет."
+        -1 -> "Страница сайта не готова. Нажмите «Главная», подождите 5 секунд и повторите."
+        0 -> "Ошибка сети."
+        401, 403 -> "Нет доступа (" + status + "). Нажмите «Главная», подождите 5 секунд (нужна сессия) и повторите."
+        else -> "Ошибка " + status + ": " + text.take(300)
+    }
+
+    private fun fmtDate(s: String, withTime: Boolean = false): String {
+        if (s.isEmpty()) return ""
+        return try {
+            val clean = s.replace(Regex("\\.\\d+Z$"), "Z")
+            val inp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+            val d = inp.parse(clean)!!
+            SimpleDateFormat(if (withTime) "dd.MM.yyyy HH:mm" else "dd.MM.yyyy", Locale.GERMANY)
+                .apply { timeZone = TimeZone.getTimeZone("Europe/Berlin") }.format(d)
+        } catch (e: Exception) {
+            s
+        }
+    }
+
+    private fun num(d: Double): String = if (d == Math.floor(d)) d.toLong().toString() else d.toString()
+
+    // ---- Infoscan ----
+
+    private fun askInfoscan() {
+        val input = EditText(this).apply {
+            hint = "Штрихкод / номер LE"
+            inputType = InputType.TYPE_CLASS_TEXT
+            setSingleLine()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Infoscan")
+            .setView(input)
+            .setPositiveButton("Найти") { _, _ ->
+                val c = input.text.toString().trim()
+                if (c.isNotEmpty()) runInfoscan(c)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun runInfoscan(code: String) {
+        show("Ищу: " + code + " ...")
+        val body = JSONObject()
+            .put("Barcode", code)
+            .put("BarcodeConfigurationName", JSONObject.NULL)
+            .put("IncludeAllBarcodeInfos", false)
+            .toString()
+        api(
+            "PUT",
+            "/server/api/Process/executeAction?actionKey=Warehouse.Forms.InfoScan.LayoutItems.InfoScan.Actions.GetEntitiesFromBarcode",
+            body
+        ) { st, txt ->
+            if (st != 200) {
+                show(apiError(st, txt))
+            } else {
+                lastRaw = txt
+                try {
+                    val ents = JSONObject(txt).optJSONObject("Result")?.optJSONArray("Entities")
+                    if (ents == null || ents.length() == 0) {
+                        show("Ничего не найдено по коду: " + code)
+                    } else {
+                        val sb = StringBuilder()
+                        val unitIds = ArrayList<Long>()
+                        for (i in 0 until ents.length()) {
+                            val e = ents.getJSONObject(i)
+                            sb.append(describe(e)).append("\n\n")
+                            if (e.optString("EntityType").endsWith("StorageUnit") && !e.isNull("EquipmentTypeId")) {
+                                unitIds.add(e.optLong("Id"))
+                            }
+                        }
+                        show(sb.toString())
+                        unitIds.forEach { loadContent(it, sb) }
+                    }
+                } catch (ex: Exception) {
+                    show("Не удалось разобрать ответ: " + ex.message + "\n\n" + txt.take(1500))
+                }
+            }
+        }
+    }
+
+    private fun describe(e: JSONObject): String {
+        val type = e.optString("EntityType").substringAfterLast('.')
+        val calc = e.optJSONObject("Calculated")
+        val sb = StringBuilder("▪ ").append(type)
+        val bc = e.optString("Barcode")
+        if (bc.isNotEmpty()) sb.append("  ").append(bc)
+        val nm = listOf(e.optString("Number"), e.optString("Name"), e.optString("Description"))
+            .filter { it.isNotEmpty() }.joinToString(" · ")
+        if (nm.isNotEmpty()) sb.append("\n  ").append(nm)
+        val et = calc?.optJSONObject("EquipmentType")
+        if (et != null) {
+            val t = et.optString("Description").ifEmpty { et.optString("Name") }
+            sb.append("\n  Тип: ").append(t)
+        }
+        val parents = calc?.optJSONObject("Topology")?.optJSONArray("Parents")
+        if (parents != null && parents.length() > 0) {
+            val names = ArrayList<String>()
+            for (i in 0 until parents.length()) {
+                val n = parents.getJSONObject(i).optString("Name")
+                if (n.isNotEmpty()) names.add(n)
+            }
+            sb.append("\n  Место: ").append(names.joinToString(" > "))
+        }
+        val gi = fmtDate(calc?.optString("GoodsInDate") ?: "", true)
+        if (gi.isNotEmpty()) sb.append("\n  Приход: ").append(gi)
+        return sb.toString()
+    }
+
+    private fun loadContent(unitId: Long, sb: StringBuilder) {
+        val body = JSONObject()
+            .put("ConsiderAllBlockingKindsForCalculatedQuantities", true)
+            .put("Id", unitId)
+            .put(
+                "SearchRequest", JSONObject()
+                    .put("SortConfigurationKey", JSONObject.NULL)
+                    .put("InvertSorting", false)
+                    .put("CancelSearchRequestIfAbortedByClient", true)
+                    .put("Skip", 0)
+                    .put("Top", 50)
+            ).toString()
+        api(
+            "PUT",
+            "/server/api/Process/executeAction?actionKey=Equipment.Forms.EquipmentDetails.LayoutItems.EquipmentContent.Actions.Search",
+            body
+        ) { st, txt ->
+            if (st != 200) {
+                sb.append("Содержимое: ").append(apiError(st, txt))
+                show(sb.toString())
+            } else {
+                lastRaw = txt
+                try {
+                    val pr = JSONObject(txt).optJSONObject("PageResult")
+                    val items = pr?.optJSONArray("Items")
+                    sb.append("Содержимое (").append(pr?.optInt("Total") ?: 0).append("):\n\n")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            sb.append(describeQuant(items.getJSONObject(i))).append("\n\n")
+                        }
+                    }
+                    show(sb.toString())
+                } catch (ex: Exception) {
+                    sb.append("Не удалось разобрать содержимое: ").append(ex.message)
+                    show(sb.toString())
+                }
+            }
+        }
+    }
+
+    private fun describeQuant(q: JSONObject): String {
+        val art = q.optJSONObject("Calculated")?.optJSONObject("Article")
+        val sb = StringBuilder("• ")
+        if (art != null) {
+            val title = listOf(art.optString("Number"), art.optString("Name"))
+                .filter { it.isNotEmpty() }.joinToString(" · ")
+            sb.append(title.ifEmpty { "артикул " + art.optString("Id") })
+            val desc = art.optString("Description")
+            if (desc.isNotEmpty()) sb.append("\n   ").append(desc)
+            val gtin = art.optString("GTIN")
+            if (gtin.isNotEmpty()) sb.append("\n   EAN ").append(gtin)
+        } else {
+            sb.append("(без артикула)")
+        }
+        val parts = ArrayList<String>()
+        if (!q.isNull("Quantity")) {
+            var unit = ""
+            val qu = art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit")
+            if (qu != null) {
+                for (k in listOf("ShortName", "Symbol", "Abbreviation", "Name")) {
+                    val v = qu.optString(k)
+                    if (v.isNotEmpty()) { unit = v; break }
+                }
+            }
+            parts.add((num(q.optDouble("Quantity")) + " " + unit).trim())
+        }
+        val mhd = fmtDate(q.optString("ExpirationDate"))
+        if (mhd.isNotEmpty()) parts.add("MHD " + mhd)
+        val batch = q.optString("Batch")
+        if (batch.isNotEmpty()) parts.add("Charge " + batch)
+        if (parts.isNotEmpty()) sb.append("\n   ").append(parts.joinToString(" · "))
+        return sb.toString()
+    }
+
+    // ---- Заказы (Bestellungen) ----
+
+    private fun runOrders() {
+        show("Загружаю заказы ...")
+        val body = "{\"SearchRequest\":{\"SortConfigurationKey\":\"GoodsInOrder.SortConfigurations.Status\"," +
+            "\"PropertyFilters\":[{\"Operator\":\"In\",\"Values\":[\"GoodsInOrder.Status.GoodsInOrder.Process\"," +
+            "\"GoodsInOrder.Status.GoodsInOrder.Created\"],\"Key\":\"GoodsInOrder.EnumFilters.GoodsInOrder.Calculated.Status\"," +
+            "\"PropertyPath\":\"Calculated.Status.Key\",\"OrPropertyPaths\":null,\"NoDbFilter\":false}]," +
+            "\"InvertSorting\":false,\"CancelSearchRequestIfAbortedByClient\":true,\"Skip\":0,\"Top\":30}," +
+            "\"IncludeDeactivated\":true}"
+        api(
+            "PUT",
+            "/server/api/Process/executeAction?actionKey=GoodsInOrder.Forms.GoodsInOrderList.LayoutItems.GoodsInOrderList.Actions.Search",
+            body
+        ) { st, txt ->
+            if (st != 200) {
+                show(apiError(st, txt))
+            } else {
+                lastRaw = txt
+                try {
+                    val pr = JSONObject(txt).optJSONObject("PageResult")
+                    val items = pr?.optJSONArray("Items")
+                    val sb = StringBuilder("Заказы на приход: показано ")
+                        .append(items?.length() ?: 0).append(" из ").append(pr?.optInt("Total") ?: 0).append("\n\n")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            val o = items.getJSONObject(i)
+                            val calc = o.optJSONObject("Calculated")
+                            val stRaw = calc?.opt("Status")
+                            val stKey = when (stRaw) {
+                                is JSONObject -> stRaw.optString("Key")
+                                is String -> stRaw
+                                else -> ""
+                            }.substringAfterLast('.')
+                            val stRu = when (stKey) {
+                                "Process" -> "в работе"
+                                "Created" -> "создан"
+                                else -> stKey
+                            }
+                            val supplier = o.optJSONObject("Supplier")?.optString("Name1") ?: ""
+                            val pc = if (o.has("PositionCount")) o.optInt("PositionCount", -1) else (calc?.optInt("PositionCount", -1) ?: -1)
+                            sb.append("• ").append(o.optString("Number")).append(" · ").append(supplier).append("\n   ")
+                            sb.append("план ").append(fmtDate(o.optString("PlannedGoodsInDate"), true))
+                            if (stRu.isNotEmpty()) sb.append(" · ").append(stRu)
+                            if (pc >= 0) sb.append(" · поз. ").append(pc)
+                            sb.append("\n\n")
+                        }
+                    }
+                    show(sb.toString())
+                } catch (ex: Exception) {
+                    show("Не удалось разобрать ответ: " + ex.message + "\n\n" + txt.take(1500))
+                }
+            }
+        }
+    }
+
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -283,6 +560,28 @@ class MainActivity : AppCompatActivity() {
 (function(){
   if (window.__wmsHook) return;
   window.__wmsHook = true;
+  var cap = window.__wmsHdr = {};
+  function capture(k, v){ try { if (/^(x-csrf|x-requested-with)/i.test(k)) cap[k] = v; } catch (e) {} }
+  function hc(h){
+    try {
+      if (!h) return;
+      if (Array.isArray(h)) { h.forEach(function(p){ capture(p[0], p[1]); }); }
+      else if (typeof h.forEach === 'function') { h.forEach(function(v, k){ capture(k, v); }); }
+      else { Object.keys(h).forEach(function(k){ capture(k, h[k]); }); }
+    } catch (e) {}
+  }
+  window.__wmsCall = function(id, method, url, body){
+    try {
+      var x = new XMLHttpRequest();
+      x.open(method, url, true);
+      x.setRequestHeader('Content-Type', 'application/json');
+      x.setRequestHeader('Accept', 'application/json, text/plain, */*');
+      for (var k in cap) { x.setRequestHeader(k, cap[k]); }
+      x.onload = function(){ window.WmsBridge.result(id, x.status, x.responseText || ''); };
+      x.onerror = function(){ window.WmsBridge.result(id, 0, ''); };
+      x.send(body);
+    } catch (e) { window.WmsBridge.result(id, -1, String(e)); }
+  };
   var sens = /login|logon|auth|token|password|signin|session/i;
   var noise = /GetStatisticsUpdate|GetDashboardMessage|GetSystemMessage|\.(js|css|png|jpg|gif|svg|ico|woff2?|ttf|map)(\?|$)|coglas-cloud\.com/i;
   function clip(s, n){ if (s == null) return ''; s = String(s).replace(/\s+/g,' '); return s.length > n ? s.slice(0, n) + '...' : s; }
@@ -313,6 +612,7 @@ class MainActivity : AppCompatActivity() {
       var method = (init && init.method) || (input && input.method) || 'GET';
       var body = (init && typeof init.body === 'string') ? init.body : '';
       var hd = hn(init && init.headers);
+      hc(init && init.headers);
       return of.apply(this, arguments).then(function(r){
         try {
           r.clone().text().then(function(t){ send(method, url, r.status, body, t, hd); })
@@ -324,7 +624,7 @@ class MainActivity : AppCompatActivity() {
   }
   var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send, xh = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.open = function(m, u){ this.__m = m; this.__u = u; return xo.apply(this, arguments); };
-  XMLHttpRequest.prototype.setRequestHeader = function(k, v){ (this.__h = this.__h || []).push(k); return xh.apply(this, arguments); };
+  XMLHttpRequest.prototype.setRequestHeader = function(k, v){ (this.__h = this.__h || []).push(k); capture(k, v); return xh.apply(this, arguments); };
   XMLHttpRequest.prototype.send = function(b){
     var x = this; var body = (typeof b === 'string') ? b : '';
     x.addEventListener('loadend', function(){
