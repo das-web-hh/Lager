@@ -36,6 +36,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -476,14 +477,7 @@ class MainActivity : AppCompatActivity() {
         }
         val parts = ArrayList<String>()
         if (!q.isNull("Quantity")) {
-            var unit = ""
-            val qu = art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit")
-            if (qu != null) {
-                for (k in listOf("ShortName", "Symbol", "Abbreviation", "Name")) {
-                    val v = qu.optString(k)
-                    if (v.isNotEmpty()) { unit = v; break }
-                }
-            }
+            val unit = unitName(art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit"))
             parts.add((num(q.optDouble("Quantity")) + " " + unit).trim())
         }
         val mhd = fmtDate(q.optString("ExpirationDate"))
@@ -495,6 +489,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---- Заказы (Bestellungen) ----
+
+    private fun statusKey(calc: JSONObject?): String {
+        val raw = calc?.opt("Status")
+        val k = when (raw) {
+            is JSONObject -> raw.optString("Key")
+            is String -> raw
+            else -> ""
+        }
+        return k.substringAfterLast('.')
+    }
+
+    private fun statusRu(k: String): String = when (k) {
+        "Process" -> "в работе"
+        "Created" -> "создан"
+        "Done" -> "готово"
+        "AuditRequired" -> "нужна проверка"
+        "ReportedToErp" -> "передан в ERP"
+        "Deactivated" -> "деактивирован"
+        else -> k
+    }
+
+    private fun unitName(qu: JSONObject?): String {
+        if (qu == null) return ""
+        for (k in listOf("Shortcut", "ShortName", "Symbol", "Abbreviation", "Description", "Name")) {
+            val v = qu.optString(k)
+            if (v.isNotEmpty()) return v
+        }
+        return ""
+    }
 
     private fun runOrders() {
         show("Загружаю заказы ...")
@@ -516,35 +539,144 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val pr = JSONObject(txt).optJSONObject("PageResult")
                     val items = pr?.optJSONArray("Items")
-                    val sb = StringBuilder("Заказы на приход: показано ")
-                        .append(items?.length() ?: 0).append(" из ").append(pr?.optInt("Total") ?: 0).append("\n\n")
+                    val total = pr?.optInt("Total") ?: 0
+                    val ids = ArrayList<Long>()
+                    val nums = ArrayList<String>()
+                    val labels = ArrayList<String>()
                     if (items != null) {
                         for (i in 0 until items.length()) {
                             val o = items.getJSONObject(i)
                             val calc = o.optJSONObject("Calculated")
-                            val stRaw = calc?.opt("Status")
-                            val stKey = when (stRaw) {
-                                is JSONObject -> stRaw.optString("Key")
-                                is String -> stRaw
-                                else -> ""
-                            }.substringAfterLast('.')
-                            val stRu = when (stKey) {
-                                "Process" -> "в работе"
-                                "Created" -> "создан"
-                                else -> stKey
-                            }
                             val supplier = o.optJSONObject("Supplier")?.optString("Name1") ?: ""
                             val pc = if (o.has("PositionCount")) o.optInt("PositionCount", -1) else (calc?.optInt("PositionCount", -1) ?: -1)
-                            sb.append("• ").append(o.optString("Number")).append(" · ").append(supplier).append("\n   ")
-                            sb.append("план ").append(fmtDate(o.optString("PlannedGoodsInDate"), true))
-                            if (stRu.isNotEmpty()) sb.append(" · ").append(stRu)
-                            if (pc >= 0) sb.append(" · поз. ").append(pc)
-                            sb.append("\n\n")
+                            val l = StringBuilder()
+                            l.append(o.optString("Number")).append(" · ").append(supplier).append("\n")
+                            l.append("план ").append(fmtDate(o.optString("PlannedGoodsInDate")))
+                            val sr = statusRu(statusKey(calc))
+                            if (sr.isNotEmpty()) l.append(" · ").append(sr)
+                            if (pc >= 0) l.append(" · поз. ").append(pc)
+                            ids.add(o.optLong("Id"))
+                            nums.add(o.optString("Number"))
+                            labels.add(l.toString())
+                        }
+                    }
+                    if (labels.isEmpty()) {
+                        show("Заказов нет.")
+                    } else {
+                        panel.visibility = View.GONE
+                        AlertDialog.Builder(this)
+                            .setTitle("Заказы: " + labels.size + " из " + total)
+                            .setItems(labels.toTypedArray()) { _, which -> openOrder(ids[which], nums[which]) }
+                            .setNegativeButton("Закрыть", null)
+                            .show()
+                    }
+                } catch (ex: Exception) {
+                    show("Не удалось разобрать ответ: " + ex.message + "\n\n" + txt.take(1500))
+                }
+            }
+        }
+    }
+
+    private fun openOrder(id: Long, number: String) {
+        show("Заказ " + number + ": загружаю ...")
+        val sb = StringBuilder()
+        api(
+            "PUT",
+            "/server/api/Process/executeAction?actionKey=GoodsInOrder.Forms.GoodsInOrder.LayoutItems.GoodsInOrderDetails.Actions.Read",
+            JSONObject().put("Id", id).toString()
+        ) { st, txt ->
+            if (st != 200) {
+                sb.append("Шапка заказа: ").append(apiError(st, txt)).append("\n\n")
+            } else {
+                lastRaw = txt
+                try {
+                    val r = JSONObject(txt).optJSONObject("Result")
+                    if (r != null) {
+                        fun add(label: String, v: String) {
+                            if (v.isNotEmpty()) sb.append(label).append(": ").append(v).append("\n")
+                        }
+                        sb.append("Заказ ").append(r.optString("Number")).append("\n")
+                        val sup = r.optJSONObject("Supplier")
+                        val supName = listOf(sup?.optString("Name1") ?: "", sup?.optString("Name2") ?: "")
+                            .filter { it.isNotEmpty() }.joinToString(" ")
+                        val city = sup?.optString("City") ?: ""
+                        add("Поставщик", if (city.isNotEmpty()) supName + " (" + city + ")" else supName)
+                        add("Создан", fmtDate(r.optString("CreationDate"), true))
+                        add("План прихода", fmtDate(r.optString("PlannedGoodsInDate")))
+                        add("Статус", statusRu(statusKey(r.optJSONObject("Calculated"))))
+                        add("Внешний номер", r.optString("HostReferenceNumber2").ifEmpty { r.optString("ExternalNumber") })
+                        add("Категория", r.optString("Category"))
+                        add("Примечание", r.optString("Remarks"))
+                        sb.append("\n")
+                    }
+                } catch (ex: Exception) {
+                    sb.append("Не удалось разобрать шапку: ").append(ex.message).append("\n\n")
+                }
+            }
+            loadOrderPositions(id, sb)
+        }
+    }
+
+    private fun loadOrderPositions(id: Long, sb: StringBuilder) {
+        show(sb.toString() + "Загружаю позиции ...")
+        val body = JSONObject()
+            .put(
+                "SearchRequest", JSONObject()
+                    .put("SortConfigurationKey", "GoodsInOrder.SortConfigurations.Number")
+                    .put("PropertyFilters", JSONArray())
+                    .put("InvertSorting", false)
+                    .put("CancelSearchRequestIfAbortedByClient", true)
+                    .put("Skip", 0)
+                    .put("Top", 100)
+            )
+            .put("ParentId", id)
+            .put("AddOverdeliveryWarning", true)
+            .put("AddSinglePartRequirements", true)
+            .put("AddStockQualificationsRequiredFields", true)
+            .toString()
+        api(
+            "PUT",
+            "/server/api/Process/executeAction?actionKey=GoodsInOrder.Forms.GoodsInOrder.LayoutItems.Positions.Actions.Search",
+            body
+        ) { st, txt ->
+            if (st != 200) {
+                sb.append("Позиции: ").append(apiError(st, txt))
+                show(sb.toString())
+            } else {
+                lastRaw = txt
+                try {
+                    val pr = JSONObject(txt).optJSONObject("PageResult")
+                    val items = pr?.optJSONArray("Items")
+                    val total = pr?.optInt("Total") ?: 0
+                    sb.append("Позиции (").append(items?.length() ?: 0).append(" из ").append(total).append("):\n\n")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            val p = items.getJSONObject(i)
+                            val calc = p.optJSONObject("Calculated")
+                            val art = calc?.optJSONObject("Article")
+                            val title = listOf(art?.optString("Number") ?: "", art?.optString("Name") ?: "")
+                                .filter { it.isNotEmpty() }.joinToString(" · ")
+                            val done = statusKey(calc) == "Done"
+                            sb.append(p.optInt("Number")).append(". ").append(if (done) "✓ " else "").append(title).append("\n")
+                            val parts = ArrayList<String>()
+                            if (!p.isNull("Quantity")) {
+                                val unit = unitName(art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit"))
+                                parts.add((num(p.optDouble("Quantity")) + " " + unit).trim())
+                            }
+                            val gtin = art?.optString("GTIN") ?: ""
+                            if (gtin.isNotEmpty()) parts.add("EAN " + gtin)
+                            val mhd = fmtDate(p.optString("ExpirationDate"))
+                            if (mhd.isNotEmpty()) parts.add("MHD " + mhd)
+                            val sr = statusRu(statusKey(calc))
+                            if (sr.isNotEmpty()) parts.add(sr)
+                            if (parts.isNotEmpty()) sb.append("   ").append(parts.joinToString(" · ")).append("\n")
+                            sb.append("\n")
                         }
                     }
                     show(sb.toString())
                 } catch (ex: Exception) {
-                    show("Не удалось разобрать ответ: " + ex.message + "\n\n" + txt.take(1500))
+                    sb.append("Не удалось разобрать позиции: ").append(ex.message)
+                    show(sb.toString())
                 }
             }
         }
