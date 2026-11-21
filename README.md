@@ -1,4 +1,4 @@
-# WMS Helper (тестовая версия 0.5.0)
+# WMS Helper (тестовая версия 0.6.0)
 
 Android-приложение: открывает stroeh.coglas.com в WebView и умеет:
 - **Разведка** — список видимых кнопок/ссылок/полей текущей страницы (только чтение)
@@ -18,7 +18,7 @@ unzip ~/storage/downloads/WmsHelper.zip -d WmsHelper_tmp
 cd WmsHelper_tmp/WmsHelper
 git init -b main
 git add .
-git commit -m "WMS Helper 0.5.0"
+git commit -m "WMS Helper 0.6.0"
 git remote add origin https://github.com/ИМЯ/РЕПО.git
 git push -u origin main
 ```

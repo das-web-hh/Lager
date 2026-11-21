@@ -43,6 +43,8 @@ import java.util.Locale
 import java.util.TimeZone
 import org.json.JSONTokener
 
+private fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key)
+
 private const val START_URL = "https://stroeh.coglas.com/"
 private const val ALLOWED_HOST_SUFFIX = "coglas.com"
 
@@ -379,7 +381,7 @@ class MainActivity : AppCompatActivity() {
                         for (i in 0 until ents.length()) {
                             val e = ents.getJSONObject(i)
                             sb.append(describe(e)).append("\n\n")
-                            if (e.optString("EntityType").endsWith("StorageUnit") && !e.isNull("EquipmentTypeId")) {
+                            if (e.str("EntityType").endsWith("StorageUnit") && !e.isNull("EquipmentTypeId")) {
                                 unitIds.add(e.optLong("Id"))
                             }
                         }
@@ -394,29 +396,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun describe(e: JSONObject): String {
-        val type = e.optString("EntityType").substringAfterLast('.')
+        val type = e.str("EntityType").substringAfterLast('.')
         val calc = e.optJSONObject("Calculated")
         val sb = StringBuilder("▪ ").append(type)
-        val bc = e.optString("Barcode")
+        val bc = e.str("Barcode")
         if (bc.isNotEmpty()) sb.append("  ").append(bc)
-        val nm = listOf(e.optString("Number"), e.optString("Name"), e.optString("Description"))
+        val nm = listOf(e.str("Number"), e.str("Name"), e.str("Description"))
             .filter { it.isNotEmpty() }.joinToString(" · ")
         if (nm.isNotEmpty()) sb.append("\n  ").append(nm)
         val et = calc?.optJSONObject("EquipmentType")
         if (et != null) {
-            val t = et.optString("Description").ifEmpty { et.optString("Name") }
+            val t = et.str("Description").ifEmpty { et.str("Name") }
             sb.append("\n  Тип: ").append(t)
         }
         val parents = calc?.optJSONObject("Topology")?.optJSONArray("Parents")
         if (parents != null && parents.length() > 0) {
             val names = ArrayList<String>()
             for (i in 0 until parents.length()) {
-                val n = parents.getJSONObject(i).optString("Name")
+                val n = parents.getJSONObject(i).str("Name")
                 if (n.isNotEmpty()) names.add(n)
             }
             sb.append("\n  Место: ").append(names.joinToString(" > "))
         }
-        val gi = fmtDate(calc?.optString("GoodsInDate") ?: "", true)
+        val gi = fmtDate(calc?.str("GoodsInDate") ?: "", true)
         if (gi.isNotEmpty()) sb.append("\n  Приход: ").append(gi)
         return sb.toString()
     }
@@ -465,12 +467,12 @@ class MainActivity : AppCompatActivity() {
         val art = q.optJSONObject("Calculated")?.optJSONObject("Article")
         val sb = StringBuilder("• ")
         if (art != null) {
-            val title = listOf(art.optString("Number"), art.optString("Name"))
+            val title = listOf(art.str("Number"), art.str("Name"))
                 .filter { it.isNotEmpty() }.joinToString(" · ")
-            sb.append(title.ifEmpty { "артикул " + art.optString("Id") })
-            val desc = art.optString("Description")
+            sb.append(title.ifEmpty { "артикул " + art.str("Id") })
+            val desc = art.str("Description")
             if (desc.isNotEmpty()) sb.append("\n   ").append(desc)
-            val gtin = art.optString("GTIN")
+            val gtin = art.str("GTIN")
             if (gtin.isNotEmpty()) sb.append("\n   EAN ").append(gtin)
         } else {
             sb.append("(без артикула)")
@@ -480,9 +482,9 @@ class MainActivity : AppCompatActivity() {
             val unit = unitName(art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit"))
             parts.add((num(q.optDouble("Quantity")) + " " + unit).trim())
         }
-        val mhd = fmtDate(q.optString("ExpirationDate"))
+        val mhd = fmtDate(q.str("ExpirationDate"))
         if (mhd.isNotEmpty()) parts.add("MHD " + mhd)
-        val batch = q.optString("Batch")
+        val batch = q.str("Batch")
         if (batch.isNotEmpty()) parts.add("Charge " + batch)
         if (parts.isNotEmpty()) sb.append("\n   ").append(parts.joinToString(" · "))
         return sb.toString()
@@ -493,7 +495,7 @@ class MainActivity : AppCompatActivity() {
     private fun statusKey(calc: JSONObject?): String {
         val raw = calc?.opt("Status")
         val k = when (raw) {
-            is JSONObject -> raw.optString("Key")
+            is JSONObject -> raw.str("Key")
             is String -> raw
             else -> ""
         }
@@ -513,7 +515,7 @@ class MainActivity : AppCompatActivity() {
     private fun unitName(qu: JSONObject?): String {
         if (qu == null) return ""
         for (k in listOf("Shortcut", "ShortName", "Symbol", "Abbreviation", "Description", "Name")) {
-            val v = qu.optString(k)
+            val v = qu.str(k)
             if (v.isNotEmpty()) return v
         }
         return ""
@@ -547,16 +549,16 @@ class MainActivity : AppCompatActivity() {
                         for (i in 0 until items.length()) {
                             val o = items.getJSONObject(i)
                             val calc = o.optJSONObject("Calculated")
-                            val supplier = o.optJSONObject("Supplier")?.optString("Name1") ?: ""
+                            val supplier = o.optJSONObject("Supplier")?.str("Name1") ?: ""
                             val pc = if (o.has("PositionCount")) o.optInt("PositionCount", -1) else (calc?.optInt("PositionCount", -1) ?: -1)
                             val l = StringBuilder()
-                            l.append(o.optString("Number")).append(" · ").append(supplier).append("\n")
-                            l.append("план ").append(fmtDate(o.optString("PlannedGoodsInDate")))
+                            l.append(o.str("Number")).append(" · ").append(supplier).append("\n")
+                            l.append("план ").append(fmtDate(o.str("PlannedGoodsInDate")))
                             val sr = statusRu(statusKey(calc))
                             if (sr.isNotEmpty()) l.append(" · ").append(sr)
                             if (pc >= 0) l.append(" · поз. ").append(pc)
                             ids.add(o.optLong("Id"))
-                            nums.add(o.optString("Number"))
+                            nums.add(o.str("Number"))
                             labels.add(l.toString())
                         }
                     }
@@ -595,18 +597,18 @@ class MainActivity : AppCompatActivity() {
                         fun add(label: String, v: String) {
                             if (v.isNotEmpty()) sb.append(label).append(": ").append(v).append("\n")
                         }
-                        sb.append("Заказ ").append(r.optString("Number")).append("\n")
+                        sb.append("Заказ ").append(r.str("Number")).append("\n")
                         val sup = r.optJSONObject("Supplier")
-                        val supName = listOf(sup?.optString("Name1") ?: "", sup?.optString("Name2") ?: "")
+                        val supName = listOf(sup?.str("Name1") ?: "", sup?.str("Name2") ?: "")
                             .filter { it.isNotEmpty() }.joinToString(" ")
-                        val city = sup?.optString("City") ?: ""
+                        val city = sup?.str("City") ?: ""
                         add("Поставщик", if (city.isNotEmpty()) supName + " (" + city + ")" else supName)
-                        add("Создан", fmtDate(r.optString("CreationDate"), true))
-                        add("План прихода", fmtDate(r.optString("PlannedGoodsInDate")))
+                        add("Создан", fmtDate(r.str("CreationDate"), true))
+                        add("План прихода", fmtDate(r.str("PlannedGoodsInDate")))
                         add("Статус", statusRu(statusKey(r.optJSONObject("Calculated"))))
-                        add("Внешний номер", r.optString("HostReferenceNumber2").ifEmpty { r.optString("ExternalNumber") })
-                        add("Категория", r.optString("Category"))
-                        add("Примечание", r.optString("Remarks"))
+                        add("Внешний номер", r.str("HostReferenceNumber2").ifEmpty { r.str("ExternalNumber") })
+                        add("Категория", r.str("Category"))
+                        add("Примечание", r.str("Remarks"))
                         sb.append("\n")
                     }
                 } catch (ex: Exception) {
@@ -617,7 +619,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadOrderPositions(id: Long, sb: StringBuilder) {
+    private fun loadOrderPositions(id: Long, sb: StringBuilder, skip: Int = 0, ctx: IntArray = IntArray(4)) {
+        // ctx: [0] позиция вставки итоговой строки, [1] готово, [2] в работе, [3] создано
         show(sb.toString() + "Загружаю позиции ...")
         val body = JSONObject()
             .put(
@@ -626,7 +629,7 @@ class MainActivity : AppCompatActivity() {
                     .put("PropertyFilters", JSONArray())
                     .put("InvertSorting", false)
                     .put("CancelSearchRequestIfAbortedByClient", true)
-                    .put("Skip", 0)
+                    .put("Skip", skip)
                     .put("Top", 100)
             )
             .put("ParentId", id)
@@ -648,32 +651,49 @@ class MainActivity : AppCompatActivity() {
                     val pr = JSONObject(txt).optJSONObject("PageResult")
                     val items = pr?.optJSONArray("Items")
                     val total = pr?.optInt("Total") ?: 0
-                    sb.append("Позиции (").append(items?.length() ?: 0).append(" из ").append(total).append("):\n\n")
+                    val got = items?.length() ?: 0
+                    if (skip == 0) {
+                        sb.append("Позиции (").append(total).append("):\n\n")
+                        ctx[0] = sb.length
+                    }
                     if (items != null) {
                         for (i in 0 until items.length()) {
                             val p = items.getJSONObject(i)
                             val calc = p.optJSONObject("Calculated")
                             val art = calc?.optJSONObject("Article")
-                            val title = listOf(art?.optString("Number") ?: "", art?.optString("Name") ?: "")
+                            val title = listOf(art?.str("Number") ?: "", art?.str("Name") ?: "")
                                 .filter { it.isNotEmpty() }.joinToString(" · ")
-                            val done = statusKey(calc) == "Done"
-                            sb.append(p.optInt("Number")).append(". ").append(if (done) "✓ " else "").append(title).append("\n")
+                            val key = statusKey(calc)
+                            when (key) {
+                                "Done" -> ctx[1]++
+                                "Process" -> ctx[2]++
+                                "Created" -> ctx[3]++
+                            }
+                            sb.append(p.optInt("Number")).append(". ").append(if (key == "Done") "✓ " else "").append(title).append("\n")
                             val parts = ArrayList<String>()
                             if (!p.isNull("Quantity")) {
                                 val unit = unitName(art?.optJSONObject("Calculated")?.optJSONObject("QuantityUnit"))
                                 parts.add((num(p.optDouble("Quantity")) + " " + unit).trim())
                             }
-                            val gtin = art?.optString("GTIN") ?: ""
+                            val gtin = art?.str("GTIN") ?: ""
                             if (gtin.isNotEmpty()) parts.add("EAN " + gtin)
-                            val mhd = fmtDate(p.optString("ExpirationDate"))
+                            val mhd = fmtDate(p.str("ExpirationDate"))
                             if (mhd.isNotEmpty()) parts.add("MHD " + mhd)
-                            val sr = statusRu(statusKey(calc))
+                            val sr = statusRu(key)
                             if (sr.isNotEmpty()) parts.add(sr)
                             if (parts.isNotEmpty()) sb.append("   ").append(parts.joinToString(" · ")).append("\n")
                             sb.append("\n")
                         }
                     }
-                    show(sb.toString())
+                    val next = skip + got
+                    if (got > 0 && next < total && next < 500) {
+                        loadOrderPositions(id, sb, next, ctx)
+                    } else {
+                        val summary = "✓ готово: " + ctx[1] + " · в работе: " + ctx[2] + " · создано: " + ctx[3] +
+                            (if (next < total) "\n(показано " + next + " из " + total + ")" else "") + "\n\n"
+                        sb.insert(ctx[0], summary)
+                        show(sb.toString())
+                    }
                 } catch (ex: Exception) {
                     sb.append("Не удалось разобрать позиции: ").append(ex.message)
                     show(sb.toString())
